@@ -1,0 +1,76 @@
+optimizer:
+  name: adam
+  lr: 1.0e-3
+  weight_decay: 0
+
+# Shared by every model for a fair comparison (ProEx/ProMax papers: lr 1e-3, batch 4096, 3 layers).
+train:
+  epoch: 3000
+  batch_size: 4096
+  save_model: false
+  loss: pairwise
+  test_step: 3
+  reproducible: true
+  seed: 2025
+  patience: 20
+
+test:
+  metrics: [recall, ndcg]
+  k: [5, 10, 20]
+  batch_size: 1024
+
+data:
+  type: general_cf
+  name: yelp
+
+# Mosaic v1 (/home/kyung/MOSAIC/encoder/config/modelconf/mosaic.yml); model block unchanged, incl. embedding_size 64
+# (its own setting; lightgcn / promax / discorec use 32 -> --override embedding_size=32 for an equal-d comparison).
+# Needs community_assignments.pkl, user/item_intent_emb_3.pkl, community_intent_emb.pkl, user/item_conf_emb.pkl,
+# community_conf_emb.pkl in data/<dataset>/.
+model:
+  name: mosaic
+  type: discriminative
+
+  top_k: 2
+  gate_hidden_size: 128
+
+  layer_modulation_scale: 0.5
+  layer_modulation_lambda_init: 1.0e-2
+  layer_modulation_init_std: 1.0e-3
+
+  keep_rate: 1.0
+  embedding_size: 64
+  layer_num: 3
+  reg_weight: 1.0e-6
+  balance_loss_weight: 0.0
+
+  llm_embedding_device: model
+
+  amazon_book:
+    layer_num: 3
+    reg_weight: 1.0e-6
+    balance_loss_weight: 1.0e-3
+    layer_modulation_scale: 1.0
+    top_k: 2
+    llm_align_temperature: 0.20
+    intent_align_weight: 5.0e-4
+
+  yelp:
+    layer_num: 2
+    reg_weight: 1.0e-6
+    balance_loss_weight: 5.0e-4
+    layer_modulation_scale: 1.0
+    layer_modulation_lambda_init: 5.0e-2
+    layer_modulation_init_std: 1.0e-2
+    llm_align_temperature: 0.20
+    intent_align_weight: 5.0e-3
+    top_k: 2
+
+  amazon_movie:
+    layer_num: 3
+    reg_weight: 1.0e-6
+    balance_loss_weight: 0.0
+    layer_modulation_scale: 1.0
+    top_k: 2
+    llm_align_temperature: 0.20
+    intent_align_weight: 5.0e-3

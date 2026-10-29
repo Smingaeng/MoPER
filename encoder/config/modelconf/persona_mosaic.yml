@@ -1,0 +1,106 @@
+optimizer:
+  name: adam
+  lr: 1.0e-3
+  weight_decay: 0
+
+train:
+  epoch: 3000
+  batch_size: 4096
+  save_model: false
+  loss: pairwise
+  test_step: 3
+  reproducible: true
+  seed: 2025
+  patience: 20
+
+test:
+  metrics: [recall, ndcg]
+  k: [5, 10, 20]
+  batch_size: 1024
+
+data:
+  type: general_cf
+  name: yelp
+
+model:
+  name: persona_mosaic
+  type: discriminative
+
+  # ---- experts = persona clusters (k-means over all user personas) ----
+  expert_num: 0                    # 0: K chosen by clustering_k_select over [clustering_k_min, clustering_k_max] (no validation data); >0: fixed K
+  clustering_k_select: silhouette     # silhouette: argmax mean silhouette | elbow: kneedle elbow of the SSE curve (K=1 baseline included)
+  clustering_k_min: 2
+  clustering_k_max: 16
+  clustering_seed: 2025               # independent of train.seed so every seed shares the same experts
+  clustering_n_init: 4                # k-means++ restarts per K, lowest inertia kept
+  clustering_max_iter: 300
+  clustering_silhouette_sample: 10000 # personas sampled for the silhouette score
+  clustering_cache: true
+  clustering_device: auto             # auto: run device (GPU, fast) | cpu: bit-exact reproducible clustering | cuda
+  persona_center: true             # subtract the mean persona vector (LLM embeddings share a common direction); implied by PCA
+  text_dim: 4096                   # d_text: the space of the k-means, the closest-persona choice and the gate's cluster similarities.
+                                   # 4096 (= raw text embedding dim) or 0: no PCA. Smaller (e.g. 32): PCA fitted on the user persona
+                                   # pool maps the 4096-d embeddings to d_text dims. CLI: --d_text 32
+  prior_space: raw                 # raw: expert prior inputs = the 4096-d text embeddings (centred, normalised) and raw-space centroids,
+                                   # so MLP^k is 4096 -> d as in MOSAIC | pca: the d_text PCA vectors and centroids (MLP^k d_text -> d)
+
+  # ---- item text (items have no facets: one vector per item) ----
+  item_text: profile                # profile: RLMRec item profile itm_emb_np.pkl | persona: LLM item persona persona/item_persona_emb.pkl
+
+  # ---- control experiments (persona content vs. a meaningless per-node vector; train from scratch) ----
+  persona_shuffle: none            # none | global: permute which user owns which persona set (among users with the same persona count)
+                                   # | within_cluster: same, but only among users sharing the dominant persona cluster (routing kept)
+  item_shuffle: false              # true: item i receives the text vector of a random other item
+  shuffle_seed: 2025               # permutation seed (default: clustering_seed)
+
+  # ---- priors and routing ----
+  prior_composition: product       # expert-k input per node: product = persona (.) centroid_k | persona | cluster (centroid only)
+  gate_persona_similarity: true    # gate input = 4 topology features (+ K cosine similarities to the clusters)
+  prior_hidden_size: null          # null: MOSAIC projector width max(d, (prior input dim + d) // 2)
+
+  top_k: 2
+  gate_hidden_size: 128
+
+  layer_modulation_scale: 0.5
+  layer_modulation_lambda_init: 1.0e-2
+  layer_modulation_init_std: 1.0e-3
+
+  keep_rate: 1.0
+  embedding_size: 64
+  layer_num: 3
+  reg_weight: 1.0e-6
+  balance_loss_weight: 0.0
+  llm_align_temperature: 0.2
+  persona_align_weight: 0.0        # gate-weighted InfoNCE between the routed output and the selected experts' priors
+
+  llm_embedding_device: model      # model: persona tables live on the model device | cpu
+
+  # Per-dataset values start from the tuned MOSAIC settings (intent_align_weight -> persona_align_weight); not yet re-tuned.
+  amazon_book:
+    layer_num: 3
+    reg_weight: 1.0e-6
+    balance_loss_weight: 1.0e-3
+    layer_modulation_scale: 1.0
+    top_k: 2
+    llm_align_temperature: 0.20
+    persona_align_weight: 5.0e-4
+
+  yelp:
+    layer_num: 2
+    reg_weight: 1.0e-6
+    balance_loss_weight: 5.0e-4
+    layer_modulation_scale: 1.0
+    layer_modulation_lambda_init: 5.0e-2
+    layer_modulation_init_std: 1.0e-2
+    llm_align_temperature: 0.20
+    persona_align_weight: 5.0e-3
+    top_k: 2
+
+  amazon_movie:
+    layer_num: 3
+    reg_weight: 1.0e-6
+    balance_loss_weight: 0.0
+    layer_modulation_scale: 1.0
+    top_k: 2
+    llm_align_temperature: 0.20
+    persona_align_weight: 5.0e-3
