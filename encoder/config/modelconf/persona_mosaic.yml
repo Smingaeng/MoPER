@@ -44,8 +44,29 @@ model:
   prior_space: raw                 # raw: expert prior inputs = the 4096-d text embeddings (centred, normalised) and raw-space centroids,
                                    # so MLP^k is 4096 -> d as in MOSAIC | pca: the d_text PCA vectors and centroids (MLP^k d_text -> d)
 
+  # ---- user persona embeddings ----
+  persona_file: persona_emb.pkl    # pickle under data/<dataset>/persona/ ({record_ids 'u<uid>:p<j>', uids, field_mean [records, dim]}).
+                                   # persona_emb.pkl = mean of the 4 views; persona_emb_one.pkl = single raw_response view
+                                   # (Book best .1672 on 2026-10-28). A non-default file gets its own clustering cache (prefix).
+
   # ---- item text (items have no facets: one vector per item) ----
   item_text: profile                # profile: RLMRec item profile itm_emb_np.pkl | persona: LLM item persona persona/item_persona_emb.pkl
+                                   # | audience: unit mean of the TRAINING users' persona means (same persona space as the user target; q057)
+
+  # ---- how the projected persona prior x^k_v enters ExpertGCN ----
+  prior_injection: modulate        # modulate: MOSAIC layer-wise gate 1 + lambda*tanh(MLP(x)) on the free embeddings (Book diagnosis
+                                   # 2026-10-29: degenerates to a node-independent mask) | additive: E^(0) = E_free + prior_add_scale * x,
+                                   # no modulation | both: additive E^(0) and the layer-wise gate
+  prior_add_scale: 1.0             # multiplier of x^k_v in additive / both
+  prior_add_free_embeds: true      # false: E^(0) = prior_add_scale * x only (no free node embeddings); additive / both only
+  prior_add_norm: false            # true: unit-normalise x^k_v rows before scaling, so the prior is a direction of norm prior_add_scale
+                                   # and cannot outgrow E_free (unnormalised x reached norm 9-20 on Book, 2026-10-30)
+
+  # ---- separate persona-content score term: y_ui = e_u.e_i + beta * sum_k w^k_u w^k_i cos(x^k_u, x^k_i) ----
+  text_score: false                # true: add the term (node embeddings untouched; beta and text/graph ratio go to the log)
+  text_score_beta_init: 1.0        # initial beta
+  text_score_beta_learnable: true  # false: beta fixed at text_score_beta_init
+  text_score_norm: true            # cosine between x^k_u and x^k_i (false: raw dot product)
 
   # ---- control experiments (persona content vs. a meaningless per-node vector; train from scratch) ----
   persona_shuffle: none            # none | global: permute which user owns which persona set (among users with the same persona count)
@@ -54,12 +75,24 @@ model:
   shuffle_seed: 2025               # permutation seed (default: clustering_seed)
 
   # ---- priors and routing ----
-  prior_composition: product       # expert-k input per node: product = persona (.) centroid_k | persona | cluster (centroid only)
+  prior_composition: product       # expert-k input per node: product = persona (.) centroid_k | persona (closest facet only; Book best)
+                                   # | cluster (centroid only) | mean (user: unit mean of ALL its personas; item: its text) (q039, 2026-11-03)
+                                   # | mix (user: unit(closest facet_k + mean of all its personas); item: its text) (q076, 2026-11-04)
+  persona_align_side: both         # both | user (drop the item-side alignment term) | item (q070, 2026-11-04)
+  persona_align_decay_epochs: 0    # >0: persona_align_weight decays linearly to 0 over this many epochs (q071, 2026-11-04); 0 = constant
+  persona_align_target: learned    # learned: align to MLP^k(x) (MOSAIC) | fixed: align to a constant PCA-to-d projection of the same
+                                   # persona text rows, stop-gradient (q040, 2026-11-03); the InfoNCE and gate weighting are unchanged
   gate_persona_similarity: true    # gate input = 4 topology features (+ K cosine similarities to the clusters)
   prior_hidden_size: null          # null: MOSAIC projector width max(d, (prior input dim + d) // 2)
 
   top_k: 2
   gate_hidden_size: 128
+
+  # ---- gate routing (Book 2026-10-29/30: the learned gate collapses to one expert within ~30 epochs) ----
+  gate_mode: learned               # learned: MOSAIC MLP(topology + cluster sims) | cluster: logits = gate_cluster_scale * z-scored
+                                   # cluster similarities (fixed persona routing, no gate parameters) | residual: learned + cluster logits
+  gate_cluster_scale: 1.0          # cluster / residual: multiplier of the z-scored similarities (larger = harder routing)
+  gate_warmup_epochs: 0            # route every node uniformly (1/K) for the first N epochs so every expert is trained before the gate chooses
 
   layer_modulation_scale: 0.5
   layer_modulation_lambda_init: 1.0e-2
@@ -69,7 +102,7 @@ model:
   embedding_size: 64
   layer_num: 3
   reg_weight: 1.0e-6
-  balance_loss_weight: 0.0
+  balance_loss_weight: 0.0         # weight of K * sum_k importance_k * load_k (value in [1, K]; 1e-3 was too weak to keep both Book experts alive)
   llm_align_temperature: 0.2
   persona_align_weight: 0.0        # gate-weighted InfoNCE between the routed output and the selected experts' priors
 

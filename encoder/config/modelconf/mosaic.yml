@@ -46,6 +46,11 @@ model:
 
   llm_embedding_device: model
 
+  # ---- LLM prior ablation (analysis only, 2026-11-02) ----
+  llm_prior: real                  # real: MOSAIC | none: all LLM tables zeroed (constant priors, intent align off) | shuffle: user and
+                                   # item intent/conformity rows permuted among nodes (control: real but wrong descriptions)
+  llm_prior_seed: 2025
+
   amazon_book:
     layer_num: 3
     reg_weight: 1.0e-6

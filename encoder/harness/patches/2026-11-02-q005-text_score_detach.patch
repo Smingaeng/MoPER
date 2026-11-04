@@ -1,0 +1,40 @@
+--- /tmp/claude-1005/-home-kyung-mosaic-v2/9343d7ed-92c1-4381-9e65-9a51b4d99da0/scratchpad/q005_backup/persona_mosaic.py	2026-11-02 18:33:12.880148913 +0900
++++ models/general_cf/persona_mosaic.py	2026-11-02 18:33:12.900148592 +0900
+@@ -1575,6 +1575,9 @@
+         # ----- separate persona-content score term (see module docstring, "Text score") -----
+         self.text_score = bool(self._hp("text_score", False))
+         self.text_score_norm = bool(self._hp("text_score_norm", True))
++        # text_score_detach: the text term sees x^k_v through a stop-gradient, so it cannot train MLP^k (the 2026-10-30
++        # Book run let the term memorise training pairs: beta 1 -> 4 with real and shuffled personas alike)
++        self.text_score_detach = bool(self._hp("text_score_detach", False))
+         if self.text_score:
+             self.text_score_beta = nn.Parameter(
+                 t.tensor(float(self._hp("text_score_beta_init", 1.0)), dtype=t.float32),
+@@ -1643,7 +1646,7 @@
+             + (
+                 f"; text score beta init={float(self.text_score_beta):.3g} "
+                 f"({'learnable' if self.text_score_beta.requires_grad else 'fixed'}, "
+-                f"{'cosine' if self.text_score_norm else 'dot'})"
++                f"{'cosine' if self.text_score_norm else 'dot'}{', stop-grad' if self.text_score_detach else ''})"
+                 if self.text_score
+                 else ""
+             )
+@@ -1821,6 +1824,8 @@
+                 w = w.to(device=device, non_blocking=True)
+             for k in self.all_expert_ids:
+                 x = self._raw_node_prior_table(node, k, device=device, prior_cache=prior_cache)
++                if self.text_score_detach:
++                    x = x.detach()
+                 if self.text_score_norm:
+                     x = F.normalize(x, dim=1)
+                 parts[node].append(w[:, k : k + 1] * x)
+--- /tmp/claude-1005/-home-kyung-mosaic-v2/9343d7ed-92c1-4381-9e65-9a51b4d99da0/scratchpad/q005_backup/persona_mosaic.yml	2026-11-02 18:33:12.884148849 +0900
++++ config/modelconf/persona_mosaic.yml	2026-11-02 18:33:12.900148592 +0900
+@@ -66,6 +66,7 @@
+   text_score_beta_init: 1.0        # initial beta
+   text_score_beta_learnable: true  # false: beta fixed at text_score_beta_init
+   text_score_norm: true            # cosine between x^k_u and x^k_i (false: raw dot product)
++  text_score_detach: false         # true: stop-gradient on x^k_v inside the term, so it cannot train MLP^k (q005, 2026-11-02)
+ 
+   # ---- control experiments (persona content vs. a meaningless per-node vector; train from scratch) ----
+   persona_shuffle: none            # none | global: permute which user owns which persona set (among users with the same persona count)

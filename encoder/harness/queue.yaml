@@ -1,0 +1,2034 @@
+# Experiment queue of the PERSONA-MOSAIC harness.
+#   status: ready (tier A: the agent may launch) | proposed (waits for the user) | launched | done | rejected
+#   tier:   A = overrides only | B = needs a code / yml-default change -> user approval, then `launch --queue qNNN --approved`
+#   Every entry carries hypothesis / prediction / decision_rule BEFORE it is launched, and `contribution` names the
+#   claim(s) it serves: experts-not-handcrafted | moe | weighted-gate | intent-conformity-in-personas | protocol.
+#   `repeat: true` allows a config that is already in the ledger (same seed; nondeterminism floor).
+#   run.py rewrites this file when it launches an entry (status -> launched, ledger_id added); the header is kept.
+experiments:
+- id: q001
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides: {}
+  repeat: true
+  label: baseline repeat (nondeterminism floor)
+  contribution:
+  - protocol
+  hypothesis: 같은 설정, 같은 seed(2025)의 재실행 편차가 R@10/N@10에서 .002 안에 든다. 이후 모든 비교의 잡음 기준으로 쓴다.
+  prediction: R@10 .106~.108, N@10 .082~.085 (기존 세 번 .1064/.1070/.1077, .0828/.0832/.0825).
+  decision_rule: 편차 <= .002 → noise_floor_default 유지. 더 크면 constraints.yaml의 noise_floor_default를 관측값으로 올리고, 과거
+    결론 중 그 폭 안의 것은 JOURNAL에 '차이 없음'으로 정정한다.
+  ledger_id: persona_mosaic-amazon_book-1102-152858
+- id: q002
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    persona_file: persona_emb_one.pkl
+  label: one-view persona embedding (재현)
+  contribution:
+  - experts-not-handcrafted
+  hypothesis: Book 최고 기록 R@20 .1672 (2026-10-28)은 raw_response 단일 view 임베딩(persona_emb_one.pkl)으로 클러스터링·prior를 만든
+    실행이었다. 4-view 평균보다 단일 view가 클러스터 분리와 prior를 더 선명하게 만든다.
+  prediction: 재현 시 R@10 ≈ .110, N@10 ≈ .085 (MOSAIC과 동률 수준).
+  decision_rule: 재현되면 one-view를 기본 후보로 승격하고 gate=cluster와 결합. 재현 안 되면(.1606 수준) 10-28 결과는 편차로 보고 폐기.
+  needs: persona_emb_one.pkl 링크 추가됨(사용자, 11-02 15:51), persona_file 노브 추가됨(11-02 16:50; 기존 one_ 클러스터 캐시 재사용, silhouette
+    .1583, sizes 16614/11532).
+  ledger_id: persona_mosaic-amazon_book-1102-155525
+- id: q003
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    item_text: persona
+  label: residual gate + item personas
+  contribution:
+  - moe
+  - weighted-gate
+  hypothesis: 아이템 페르소나는 유저 페르소나 공간에 있어(유저 평균 방향 cos .86 vs 프로필 .42) 클러스터 유사도가 1.4~1.7배 선명하다. residual gate(학습 MLP
+    + 클러스터 logits)에서는 아이템 쪽 라우팅이 프로필보다 의미 있어진다. (expert 0으로 몰린 gate에서 item_text=persona는 .1637 vs 프로필 .1606.)
+  prediction: N@10 .082~.086 (cluster+profile .0818 이상), gate top-1 share 아이템 쪽이 .45/.55보다 더 갈림.
+  decision_rule: N@10 >= MOSAIC .0855 - floor → item_text=persona를 모든 후속 cluster 실험의 기본으로. 그 미만이고 cluster+profile과
+    floor 안이면 아이템 라우팅은 지렛대가 아님 → 유저 쪽(prior 주입)으로 이동.
+  needs: 복원 패치 적용됨 (2026-11-02 16:40).
+  ledger_id: persona_mosaic-amazon_book-1102-155528
+- id: q004
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    balance_loss_weight: 0.1
+  label: residual gate (cluster logits + learned correction), balance 0.1
+  contribution:
+  - weighted-gate
+  - moe
+  hypothesis: cluster 고정 라우팅(.1584)은 노드별 보정이 없고, learned+warm-up은 노드별 분기가 날카로워지며 ep 200에서 정체했다(val .1596). cluster
+    logits 위의 학습 보정은 둘의 중간이며 balance 0.1이 붕괴를 막는다.
+  prediction: gate 생존(top-1 share .3~.7), N@10 .082~.085, best epoch 300 이상.
+  decision_rule: N@10 > cluster .0818 + floor → residual을 gate 기본값 후보로. cluster와 floor 안이면 gate 종류는 Book 성능을 가르지
+    않음 → gate 실험 중단, prior 주입 쪽으로.
+  needs: 복원 패치 적용됨 (2026-11-02 16:40).
+  ledger_id: persona_mosaic-amazon_book-1102-155531
+- id: q005
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    text_score: true
+    text_score_detach: true
+  label: best + text score with stop-grad projection (q005, user-approved code change)
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: text_score(10-30, .1584)에서 beta가 1→4로 커진 것은 학습되는 MLP^k가 텍스트 항을 통해 학습 쌍을 외운 것(셔플에서도 동일). 텍스트 항에서 MLP^k로
+    가는 gradient를 끊으면(text_score_detach) 외우기가 불가능해지고, 텍스트 AUC .80의 순수 내용 신호만 점수에 더해진다. 현재 최고 설정(residual + align
+    2e-2 + one-view, N@10 .0894)에 얹어 G2(.0957) 방향 전진 여부를 본다. 정렬이 MLP^k를 계속 훈련하므로 텍스트 항의 x^k는 정렬 목표와 같은 공간이다.
+  prediction: (a) N@10 .091 이상, beta 0.3~1.5에서 안정 → 내용 경로 유효. (b) .087~.091 → 내용 항은 중립. (c) beta→0 또는 붕괴 → 내용 경로
+    종결.
+  decision_rule: (a) → expert별 텍스트 항·beta 초기값 축으로 확장(코드 복구 후 패치 재적용 필요). (b)/(c) → text_score 계열 폐기, 코드는 복구 상태 유지.
+  needs: '코드 변경(text_score_detach)은 2026-11-02 실험 후 복구(사용자 조건). 재현용 diff: harness/patches/2026-11-02-q005-text_score_detach.patch'
+  ledger_id: persona_mosaic-amazon_book-1102-183358
+- id: q006
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+  label: residual gate + persona alignment 2e-2
+  contribution:
+  - intent-conformity-in-personas
+  - moe
+  hypothesis: persona_align_weight=2e-2가 G1에 가장 가까운 설정이다(두 번, 평균 이득 +2.3%/+2.0%; expert 0으로 몰린 gate에서). residual
+    gate(학습 MLP + 클러스터 유사도 logits, 사용자 조건대로 학습 파라미터 보유)로 두 expert를 모두 쓰게 하면 정렬 목표(각 expert의 prior)가 두 클러스터 모두에서
+    유효해져 이득이 유지되거나 커진다. (gate_mode=cluster는 파라미터가 없어 후보 불가.)
+  prediction: N@10 .086~.089, gate 생존(top-1 share .4~.6). 그 미만(.082 근처)이면 align 이득은 단일 expert 경로에서만 나는 것.
+  decision_rule: N@10 >= .0862(align 2e-2 단독 하한) → cluster+align을 주 후보로 승격, q007(통제 짝)로 내용 효과 검증. 그보다 floor 이상 낮으면
+    align은 붕괴한 learned gate 쪽에서만 작동 → q008 결과로 그 경로를 분석.
+  needs: 복원 패치 적용됨 (2026-11-02 16:40).
+  ledger_id: persona_mosaic-amazon_book-1102-155534
+- id: q007
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    persona_align_weight: 0.02
+    persona_shuffle: within_cluster
+  label: 'CONTROL: align 2e-2 + within-cluster persona shuffle'
+  contribution:
+  - experts-not-handcrafted
+  - intent-conformity-in-personas
+  hypothesis: align 2e-2의 G1 달성이 페르소나 내용 덕이라면, 라우팅(클러스터 소속)은 그대로 두고 내용만 같은 클러스터의 남의 페르소나로 바꿨을 때 이득이 사라져야 한다. (global
+    셔플 + align 2e-2는 epoch 0에서 학습 붕괴 — 틀린 목표와 BPR의 충돌로 해석되지만 단일 실행이라 불확실.)
+  prediction: 내용이 중요하면 N@10 <= .0845(기준선 수준) 또는 붕괴. 중요하지 않으면 .086 이상 유지.
+  decision_rule: N@10이 align 2e-2 실제(.0862~.0871)보다 floor 이상 낮다 → 내용 효과 최초 확인, JOURNAL에 기록하고 align 계열에 집중. 같다 →
+    align의 이득은 정규화 효과이지 내용이 아님.
+  ledger_id: persona_mosaic-amazon_book-1102-152901
+- id: q008
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    persona_align_weight: 0.02
+  repeat: true
+  label: align 2e-2 repeat with [diag] (3rd run)
+  contribution:
+  - moe
+  - weighted-gate
+  hypothesis: 기존 두 align 2e-2 실행은 [diag] 로깅 이전 코드라 gate/prior 상태를 모른다. 세 번째 실행으로 (1) G1 달성이 재현되는지 (2) gate가 붕괴한
+    채로 이득이 나는지(그러면 MoE 주장과 무관한 정규화 효과) 확인한다.
+  prediction: N@10 .086~.088 재현. gate는 붕괴(top-1 share 1.0)했을 가능성이 큼.
+  decision_rule: 재현 + 붕괴 → align 이득은 single-expert + 정렬의 효과, MoE 주장은 q006(cluster+align)에 달림. 재현 + gate 생존 → 그대로
+    주 후보. 재현 실패(.083 이하) → 2e-2 두 결과는 편차로 간주.
+  needs: 복원 패치 적용됨 (2026-11-02 16:40).
+  ledger_id: persona_mosaic-amazon_book-1102-155537
+- id: q009
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    embedding_size: 32
+  label: G3 reference - PERSONA-MOSAIC at d=32 (defaults)
+  contribution:
+  - protocol
+  hypothesis: G3는 d=32에서 ProMax d=32(+4% 선 .0704/.1109/.0727/.0867)를 넘는 것이다. d=64 기본 설정이 MOSAIC 기준 -3.7%이므로 d=32에서는
+    ProMax d=32 대비 어느 위치인지 먼저 재야 G3의 거리를 안다. (사용자 지시로 G3 전까지는 d=64가 기본이라 proposed로 둔다.)
+  prediction: d=32 기본 설정은 ProMax d=32와 비슷하거나 약간 아래 (R@10 .103~.108).
+  decision_rule: 참고값 기록만. G1 후보가 정해진 뒤 그 설정을 d=32로 다시 돌려 G3를 판정한다.
+  ledger_id: persona_mosaic-amazon_book-1102-155540
+- id: q010
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    persona_align_weight: 0.03
+  label: persona alignment 3e-2 (sweep point between 2e-2 and the 5e-2 collapse)
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 정렬 가중치는 5e-4 → 5e-3(.0805, ep147 조기정체) → 2e-2(.0871/.0862) → 5e-2(ep0 붕괴)로, 2e-2와 5e-2 사이에 최적점이 있을
+    수 있다. 3e-2는 붕괴 직전의 가장 강한 정렬이다.
+  prediction: '둘 중 하나: G1 평균 이득 +2.5~+4% (2e-2 초과) 또는 best epoch 0 붕괴. 중간값(2e-2와 floor 안)이면 2e-2가 포화점.'
+  decision_rule: 2e-2보다 floor 이상 높음 → 4e-2를 다음 점으로. 붕괴 → 2e-2를 최대 가중치로 고정하고 다른 축(gate, item_text, persona_file)과
+    결합. 포화 → 동일.
+  ledger_id: persona_mosaic-amazon_book-1102-155852
+- id: q011
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    persona_align_weight: 0.01
+  label: persona alignment 1e-2 (fills the 5e-3 -> 2e-2 gap)
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 5e-3가 기준선(5e-4)보다 나빴던 것(.0805, best ep 147)은 가중치 효과가 아니라 조기 정체(patience)일 수 있다. 1e-2로 5e-3과 2e-2 사이를
+    채우면 정렬 효과가 단조인지 알 수 있다.
+  prediction: N@10 .084~.087, best epoch 300 이상. 5e-3처럼 ep 150 전에 멈추면 5e-3 결과는 편차가 아니라 재현되는 불안정.
+  decision_rule: 단조 증가(5e-3 < 1e-2 < 2e-2) → 가중치 축은 2e-2~3e-2로 수렴. 비단조 → 5e-3과 1e-2 중 하나를 --repeat로 재실행해 잡음인지 확인.
+  ledger_id: persona_mosaic-amazon_book-1102-155855
+- id: q012
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    item_text: persona
+  label: residual gate + align 2e-2 + item personas
+  contribution:
+  - moe
+  - weighted-gate
+  - intent-conformity-in-personas
+  hypothesis: residual gate + align 2e-2가 ep 270에 val R@20 .1718로 모든 실행을 앞서고(기존 2e-2 .1541@300, 기준선 .1650@300),
+    residual + item persona도 같은 epoch에서 기준선보다 앞선다(.1651@273 vs ~.160). 두 축은 서로 다른 곳(정렬 손실 vs 아이템 텍스트 공간)을 건드리므로
+    더해진다.
+  prediction: G1 평균 이득 +3~+5%; test N@10 .088~.091. residual+align 단독(결과 대기)과 floor 안이면 아이템 축은 기여 없음.
+  decision_rule: residual+align 단독보다 floor 이상 높음 → item_text=persona를 기본 후보 설정에 포함. floor 안 → profile 유지(단순한 쪽).
+    낮음 → 아이템 페르소나는 정렬과 충돌.
+  ledger_id: persona_mosaic-amazon_book-1102-170120
+- id: q013
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+  label: residual gate + align 2e-2 + one-view personas
+  contribution:
+  - experts-not-handcrafted
+  - intent-conformity-in-personas
+  hypothesis: one-view 페르소나(raw_response 단일 view)는 10-28 Book 최고(.1672)를 냈고 지금 재현 실행도 ep 273 val .1647로 기준선 pace
+    위. 정렬 목표(prior)가 one-view 공간에서 더 선명하면 residual+align의 이득이 커진다.
+  prediction: G1 평균 이득 +3~+5%; q012와 비슷하거나 약간 위. residual+align 단독과 floor 안이면 view 선택은 기여 없음.
+  decision_rule: residual+align 단독보다 floor 이상 높음 → persona_file=one 채택, q012와 비교해 두 축 결합(q014) 제안. floor 안 → 4-view
+    유지.
+  ledger_id: persona_mosaic-amazon_book-1102-170123
+- id: q014
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+  repeat: true
+  label: residual gate + align 2e-2 REPEAT (confirm G1)
+  contribution:
+  - protocol
+  - moe
+  hypothesis: q006이 G1을 평균 +4.2%로 넘었지만 여유가 0.2점이라 GPU 비결정성(개별 지표 .002~.003 = 2~3%)만으로 뒤집힐 수 있다. 같은 seed 재실행으로 달성이
+    재현되는지 본다.
+  prediction: 평균 이득 +3~+5.5%; 두 실행 평균이 +4% 이상이면 G1 확정, 미만이면 '경계'로 기록.
+  decision_rule: '두 실행 모두 * → G1 확정, G2 축으로 이동. 한 번만 * → 경계: 세 번째 실행 없이 다음 개선(q013/q015)에서 +4%를 여유 있게 넘기는 것을 목표로.
+    둘 다 미달 → G1 미확정.'
+  ledger_id: persona_mosaic-amazon_book-1102-173248
+- id: q015
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    gate_cluster_scale: 3.0
+  label: residual gate + align 2e-2 + cluster logits x3 (route by cluster)
+  contribution:
+  - moe
+  - weighted-gate
+  hypothesis: q006의 residual gate는 학습 MLP가 클러스터 logits를 눌러 expert 1로 100% 쏠렸고, learned+align(expert 0 쏠림)보다 나았다.
+    즉 어느 클러스터의 prior를 정렬 목표로 삼느냐가 성능을 갈랐다. 클러스터 logits를 3배로 키우면 노드가 자기 클러스터의 expert로 가고 정렬 목표도 노드별 클러스터 prior가 된다.
+    MoE 구조가 정렬 효과를 키우는지 직접 시험.
+  prediction: '둘 중 하나: (a) 두 expert 생존 + N@10 .088 이상(G1 여유 확보, MoE 근거) 또는 (b) q004처럼 분산이 손해 → N@10 .080대. (c) 정렬
+    압력 증가로 붕괴 가능.'
+  decision_rule: (a) → gate_cluster_scale 축 유지(5.0 시도)·G2 후보. (b) → Book에서는 단일 expert + 정렬이 최선, MoE 근거는 다른 데이터셋에서.
+    (c) → scale 1.5로 한 단계만 재시험.
+  ledger_id: persona_mosaic-amazon_book-1102-173251
+- id: q016
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+  repeat: true
+  label: residual + align 2e-2 + one-view REPEAT (confirm best)
+  contribution:
+  - protocol
+  - experts-not-handcrafted
+  hypothesis: q013(.0894 N@10, 평균 +4.5%)이 현재 최고이며 논문의 G1 후보다. 같은 seed 재실행으로 네 지표 +4% 이상이 재현되는지, 4-view(q006/q014)와의
+    차이 +.0014가 잡음인지 본다.
+  prediction: 평균 +3.8~+5.2%. q014(4-view 재실행)와 함께 보면 one-view vs 4-view 차이가 floor(.002) 안인지 판정 가능.
+  decision_rule: 두 실행 모두 * → one-view+residual+align을 G1 확정 설정으로 CLAUDE.md §9에 기록. 하나만 * → 경계로 기록하고 G2 축 개선에서 여유를
+    벌 것. one-view-4-view 차이 < floor → 4-view(기본 파일) 유지가 단순.
+  ledger_id: persona_mosaic-amazon_book-1102-180202
+- id: q017
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    llm_align_temperature: 0.1
+  label: best + alignment InfoNCE temperature 0.1 (sharper targets)
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 정렬 이득은 목표의 선명도에서 온다(one-view > 4-view). InfoNCE 온도를 .2→.1로 낮추면 어려운 negative가 강조되어 같은 가중치에서 목표가 더 변별적이
+    된다. 단 유효 강도도 커져 3e-2형 붕괴 위험이 있다.
+  prediction: (a) N@10 .090~.093 (G2 방향 전진) 또는 (c) 붕괴(best ep 0). 중간(.088~.090)이면 온도는 가중치와 중복인 축.
+  decision_rule: (a) → 온도 .05 또는 가중치 1.5e-2+온도 .1로 한 단계 더. (c) → persona_align_weight 1.5e-2 + 온도 .1 재시험 1회. 중간
+    → 온도 축 종료.
+  ledger_id: persona_mosaic-amazon_book-1102-180205
+- id: q018
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.015
+    persona_file: persona_emb_one.pkl
+    llm_align_temperature: 0.1
+  label: best + temperature 0.1 with align 1.5e-2 (q017 rule c)
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 온도 .1은 유효 정렬 강도를 약 2배로 키워 2e-2에서 붕괴했다. 가중치를 1.5e-2로 내리면 유효 강도는 2e-2/온도 .2와 비슷해지되 negative 분포는 더 날카롭다.
+    목표 선명도가 정말 지렛대라면 같은 강도에서 더 나와야 한다.
+  prediction: (a) N@10 .090 이상 → 온도가 독립 축. (b) .086~.090 → 가중치와 중복. (c) 붕괴 또는 .085 미만 → 온도 축 종료.
+  decision_rule: (a) → 온도 .05 + 가중치 1e-2 한 단계 더. (b)/(c) → 온도 .2 고정, 축 종료.
+  ledger_id: persona_mosaic-amazon_book-1102-183118
+- id: q019
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    clustering_k_select: elbow
+  label: best + K by elbow rule (more experts, finer alignment targets)
+  contribution:
+  - experts-not-handcrafted
+  - moe
+  hypothesis: silhouette 규칙은 K=2를 고르고 gate는 한 expert로 쏠려 정렬 목표가 한 클러스터의 centroid 합성뿐이다. elbow 규칙(4-view에서 K=5)은
+    더 많은 expert를 만들고, 각 expert의 prior(페르소나 ⊙ 더 작은 클러스터의 centroid)가 더 세밀한 정렬 목표가 된다. K 선택은 여전히 validation 없는 규칙이므로
+    허용된 축.
+  prediction: (a) N@10 .090 이상 → K>2가 정렬 목표를 개선(MoE 근거). (b) .086~.090 → K는 무관(gate가 여전히 한 expert로 쏠림). (c) 분산 라우팅으로
+    .085 미만.
+  decision_rule: (a) → elbow를 기본 규칙 후보로, top_k=3 등 라우팅 폭 시험. (b)/(c) → silhouette K=2 유지.
+  ledger_id: persona_mosaic-amazon_book-1102-183121
+- id: q005b
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    text_score: true
+    text_score_detach: true
+  label: text score stop-grad WITHOUT strong alignment (q005 companion)
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: q005에서 정렬 2e-2와 텍스트 항이 상호작용(붕괴 또는 상쇄)할 수 있다. 기본 정렬(5e-4)에서 텍스트 항만의 효과를 분리한다. 비교 기준은 residual+one-view(정렬
+    5e-4)인데 그 실행은 없으므로 기본 설정(.0837)과 one-view(.0836)를 기준으로 본다.
+  prediction: (a) N@10 .086 이상 → 텍스트 항 단독으로 +3% 가치. (b) .083~.086 → 중립. (c) beta→0.
+  decision_rule: 'q005와 함께 해석: 둘 다 (a) → 내용 경로 확정. q005b만 (a) → 정렬과 충돌, 가중치 조정 축. 둘 다 (b)/(c) → 폐기.'
+  needs: q005와 같은 코드 변경(실험 후 복구).
+  ledger_id: persona_mosaic-amazon_book-1102-183401
+- id: q020
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    layer_modulation_lambda_init: 0.05
+    layer_modulation_init_std: 0.01
+  label: 'best + livelier modulation init (yelp values: lambda 5e-2, std 1e-2)'
+  contribution:
+  - intent-conformity-in-personas
+  - moe
+  hypothesis: 모든 Book 실행에서 modulator는 노드 무관 마스크로 퇴화(std over nodes ~0)해 prior가 임베딩에 못 들어간다(prior .1 vs E_free 1.0).
+    Book 초기값(lambda 1e-2, std 1e-3)이 너무 작아 초반에 prior 신호가 묻히는 것이 원인일 수 있다. yelp 설정(5e-2, 1e-2)으로 시작하면 정렬이 의미를 준 prior가
+    노드별 modulation으로 들어갈 수 있다.
+  prediction: (a) N@10 .091 이상 + swap overlap < .9 → 내용이 임베딩 경로로 쓰임. (b) floor 안 → modulation 초기값 무관. (c) .087 미만
+    → prior 간섭.
+  decision_rule: (a) → layer_modulation_scale 2.0로 한 단계 더. (b)/(c) → modulation 경로는 Book에서 종료(내용 주입은 코드 변경 영역).
+  ledger_id: persona_mosaic-amazon_book-1102-190202
+- id: q021
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+  label: best + alignment target without the centroid product (prior = MLP(persona))
+  contribution:
+  - experts-not-handcrafted
+  - intent-conformity-in-personas
+  hypothesis: 정렬 목표는 MLP^k(persona ⊙ centroid_k)이다. gate가 한 expert로 쏠린 상태에서 centroid 곱은 4096차원의 고정 재가중일 뿐이며 목표를
+    흐릴 수 있다. one-view(더 선명한 목표)가 +0.2~0.4점 냈듯 목표 선명도가 지렛대라면 centroid를 빼는 쪽이 낫다. 반대로 나빠지면 클러스터 centroid가 정렬 목표에 기여한다는
+    MoE/클러스터 근거가 된다.
+  prediction: (a) N@10 .091 이상 → centroid 곱이 방해. (b) floor 안 → 무관. (c) .087 미만 → centroid가 목표를 돕는다(클러스터 근거).
+  decision_rule: (a) → persona-only를 기본으로. (b) → 단순한 쪽(persona-only) 채택 검토. (c) → product 유지, JOURNAL에 클러스터 근거로
+    기록.
+  ledger_id: persona_mosaic-amazon_book-1102-190205
+- id: q022
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    prior_hidden_size: 256
+  label: best + narrow prior projector (MLP^k hidden 2080 -> 256)
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 정렬 이득은 정규화 효과이고, 그 목표는 MLP^k(4096→2080→64)가 만든다. 목표 생성기의 용량이 크면 목표가 그래프 임베딩을 그대로 따라가(corr↑) 정규화가 약해진다.
+    hidden을 256으로 좁히면 목표가 페르소나 텍스트에 더 묶여 정규화가 강해진다(온도·가중치 축과 달리 붕괴 위험이 작다).
+  prediction: (a) N@10 .091 이상 → 목표 용량이 지렛대, 64/128도 시험. (b) floor 안 → 무관. (c) .087 미만 → 목표가 너무 거칠어 정렬이 방해.
+  decision_rule: (a) → prior_hidden_size 64 한 단계 더. (b)/(c) → 기본 유지.
+  ledger_id: persona_mosaic-amazon_book-1102-193107
+- id: q023
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    prior_space: pca
+    text_dim: 32
+  label: best + PCA-32 persona space for clustering, similarities and the alignment target
+  contribution:
+  - experts-not-handcrafted
+  - intent-conformity-in-personas
+  hypothesis: 4096-d 원공간 대신 one-view 페르소나 풀에 맞춘 PCA-32 공간에서 k-means·클러스터 유사도·prior(MLP 32→64)를 만들면 텍스트의 잡음 차원이 빠지고
+    정렬 목표가 저차원 구조에 묶인다(q022와 같은 '목표 용량' 가설의 다른 구현). K는 규칙(silhouette)이 PCA 공간에서 다시 고르므로 expert 수가 바뀔 수 있다.
+  prediction: (a) N@10 .091 이상. (b) floor 안. (c) .087 미만 → 저차원 목표는 정보 손실. K가 2가 아니면 그 자체를 기록.
+  decision_rule: (a) → text_dim 16/64 축 시험. (b)/(c) → raw 공간 유지. q022와 같은 방향이면 '목표 용량' 결론을 JOURNAL에 기록.
+  ledger_id: persona_mosaic-amazon_book-1102-193110
+- id: q024
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+  repeat: true
+  label: persona-only target REPEAT (confirm new best / G2 proximity)
+  contribution:
+  - protocol
+  hypothesis: q021(.0918 N@10, G1 +8.1%, G2 +0.8%)이 새 최고다. 같은 seed 재실행으로 재현 폭을 잰다.
+  prediction: G1 +7~+9%, G2 -1~+2%.
+  decision_rule: 두 실행 모두 G1 * → 새 G1 확정 설정으로 승격(CLAUDE.md §9). G2 평균이 두 번 모두 0 이상이면 'ProMax d=64 동급'으로 기록.
+  ledger_id: persona_mosaic-amazon_book-1102-195703
+- id: q025
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    prior_hidden_size: 4096
+  label: persona-only target + wide prior projector (hidden 4096)
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: q022에서 hidden 256은 -29%로 정렬 목표 생성기의 용량이 부족하면 정렬이 방해가 됐다. 반대로 2080→4096으로 넓히면 목표가 더 표현력 있어져 정규화 효과가
+    커질 수 있다.
+  prediction: (a) N@10 .094 이상(G2 방향). (b) floor 안. (c) 과용량으로 목표가 그래프 임베딩을 그대로 따라가 .089 미만.
+  decision_rule: (a) → 8192 한 단계 더. (b)/(c) → 2080 유지, 용량 축 종료.
+  ledger_id: persona_mosaic-amazon_book-1102-195706
+- id: q026
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.025
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+  label: persona-only target + align 2.5e-2 (push the alignment edge with the better target)
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: persona-only 목표(G1 +8.1/+7.7%)는 centroid 합성보다 '맞추기 쉬운' 목표라 붕괴 경계가 2e-2보다 위로 밀렸을 수 있다. 2.5e-2에서 붕괴하지
+    않으면 정렬 정규화가 더 강해져 G2(.0957)에 가까워진다.
+  prediction: (a) N@10 .094 이상. (b) .089~.094 (2e-2와 floor 안). (c) 붕괴.
+  decision_rule: (a) → 3e-2 시험. (b)/(c) → 2e-2 고정, 정렬 가중치 축 최종 종료.
+  ledger_id: persona_mosaic-amazon_book-1102-210102
+- id: q027
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+  label: 'TABLE: persona-only best config on amazon_movie'
+  contribution:
+  - protocol
+  hypothesis: 교차 데이터셋 표용. G1 설정(centroid 합성)은 Movie에서 MOSAIC보다 -8% 였다. Book 최고인 persona-only 목표가 Movie에서도 더 나은지
+    본다.
+  prediction: MOSAIC 대비 -5~+5%.
+  decision_rule: MOSAIC 이상 → 표에 기록. 미만 → Movie용 정렬 가중치(5e-3, 1e-2) 재조정 제안.
+  ledger_id: persona_mosaic-amazon_movie-1102-210105
+- id: q028
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_align_weight: 0.02
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+  label: 'TABLE: persona-only best config on yelp'
+  contribution:
+  - protocol
+  hypothesis: '교차 데이터셋 표용. Book 최고 설정을 yelp에 그대로 적용(yelp 블록: 2 layers 유지).'
+  prediction: MOSAIC 대비 -5~+5%; 정렬 2e-2가 yelp에서 붕괴할 수 있음.
+  decision_rule: MOSAIC 이상 → 표에 기록. 붕괴/미만 → yelp용 정렬 가중치 재조정 제안.
+  ledger_id: persona_mosaic-yelp-1102-210108
+- id: q029
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.01
+  label: 'TABLE: movie persona-only + align 1e-2 (dataset-specific weight)'
+  contribution:
+  - protocol
+  - intent-conformity-in-personas
+  hypothesis: Movie에서 align 2e-2는 ep 54까지 그래프 학습을 눌러(E_free .025 vs prior .60) MOSAIC보다 -8%였다. Movie 기본값은 5e-3.
+    1e-2는 Book에서 '무시' 구간이었지만 Movie의 one-view 페르소나(K=10)는 목표가 더 강하게 작용하므로 유효 구간이 아래로 밀렸을 수 있다.
+  prediction: MOSAIC 대비 -3~+5%; 2e-2(-8%)보다 위.
+  decision_rule: MOSAIC +4% 이상 → Movie G1 달성, 표 기록. 사이 → 5e-3(q030)과 비교해 더 나은 쪽 채택. 둘 다 미만 → Movie에서는 정렬 축 외의 원인.
+  ledger_id: persona_mosaic-amazon_movie-1102-210214
+- id: q030
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.005
+  label: 'TABLE: movie persona-only + align 5e-3 (movie default weight)'
+  contribution:
+  - protocol
+  hypothesis: Movie 블록의 기본 정렬 가중치(5e-3, MOSAIC 튜닝값)에 residual gate + one-view + persona-only 목표만 얹는다. 정렬 강도를 바꾸지
+    않았을 때 구조 변경만의 효과.
+  prediction: MOSAIC 대비 -2~+3%.
+  decision_rule: q029와 함께 Movie 표 값 결정(둘 중 높은 쪽, 단 둘 다 보고).
+  ledger_id: persona_mosaic-amazon_movie-1102-210217
+- id: q031
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.005
+  label: 'TABLE: yelp persona-only + align 5e-3 (yelp default weight)'
+  contribution:
+  - protocol
+  hypothesis: yelp G1 설정(2e-2)은 ep 100에 val .1106으로 ProMax d=64(.1355@84)보다 한참 아래 — Movie처럼 과한 정렬. yelp 블록 기본값 5e-3에서
+    구조 변경(residual, one-view, persona-only)만의 효과를 본다.
+  prediction: MOSAIC 대비 -3~+4%.
+  decision_rule: MOSAIC 이상 → 표 기록. 미만 → yelp에서는 Book 설정이 이전 기본 설정(.0637 N@10)보다 못한지 확인 후 종료.
+  ledger_id: persona_mosaic-yelp-1102-212220
+- id: q032
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.01
+  label: 'TABLE: yelp persona-only + align 1e-2'
+  contribution:
+  - protocol
+  hypothesis: 5e-3과 2e-2 사이 점. yelp에서 정렬 가중치-성능 곡선의 모양을 본다.
+  prediction: 5e-3과 2e-2 사이 또는 아래(비단조 가능).
+  decision_rule: q031과 함께 yelp 표 값 결정.
+  ledger_id: persona_mosaic-yelp-1102-214400
+  needs: 첫 실행 OOM(GPU 1, 외부 프로세스 2×21 GB + yelp 24 GB). yelp G1 설정 실행 종료 후 GPU 0에 재실행.
+- id: q033
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    prior_composition: persona
+    persona_align_weight: 0.005
+    balance_loss_weight: 0.1
+  label: 'movie: 4-view personas + residual + persona-only + 5e-3 + balance 0.1 (keep 2 experts alive)'
+  contribution:
+  - moe
+  hypothesis: Movie에서 PERSONA는 best epoch 54~75로 MOSAIC(147)보다 훨씬 빨리 과적합하며 -4%다. MOSAIC은 서로 다른 입력의 expert를 top-2로
+    섞어 앙상블 효과를 얻지만 PERSONA는 gate가 한 expert로 쏠린다(movie 블록 balance 0). balance 0.1로 두 expert를 살리면(Book에서는 손해였지만 Book은
+    과적합이 문제가 아니었음) Movie의 조기 과적합이 완화될 수 있다. 4-view(기본 파일)로 K도 one-view의 10에서 바꾼다.
+  prediction: (a) MOSAIC -2% 이상(.0431+) → Movie에서 MoE 분산이 유효. (b) -4% 근처 → 무관. (c) 더 나쁨.
+  decision_rule: (a) → Movie 표 값 교체, Movie에서는 balance 축 유지. (b)/(c) → Movie는 5e-3 persona-only(-4.3%)로 확정, Movie
+    튜닝 종료.
+  ledger_id: persona_mosaic-amazon_movie-1102-214516
+- id: q034
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    prior_composition: persona
+    persona_align_weight: 0.005
+  label: 'P1 movie: 4-view personas + residual + persona-only + 5e-3 (no balance)'
+  contribution:
+  - experts-not-handcrafted
+  hypothesis: one-view Movie 페르소나는 K=10으로 쪼개져 expert가 작다. 4-view(기본 파일)는 K가 다르며(10-29 기본 실행 기준), one-view가 Movie에서는
+    불리할 수 있다. q033(4-view + balance .1)과 비교해 balance 효과를 분리한다.
+  prediction: MOSAIC 대비 -5~+1%.
+  decision_rule: one-view 5e-3(-4.3%)보다 floor 이상 높음 → Movie는 4-view로. 아니면 view는 무관.
+  ledger_id: persona_mosaic-amazon_movie-1102-220533
+- id: q035
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.002
+  label: 'P1 movie: persona-only + align 2e-3 (below the movie default)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: Movie에서는 정렬이 강할수록 나빴다(2e-2 -8.1%, 1e-2 -12.6%, 5e-3 -4.3%). 더 낮은 2e-3에서 정렬이 '약한 정규화'로만 작동하면 MOSAIC에
+    가까워질 수 있다.
+  prediction: -4~0%.
+  decision_rule: 5e-3보다 floor 이상 높음 → 1e-3도 시험. 아니면 Movie 정렬 축 종료(5e-3 고정).
+  ledger_id: persona_mosaic-amazon_movie-1102-230016
+  needs: 첫 실행 OOM(GPU 0). 메모리 가드로 재실행 대기.
+- id: q036
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.005
+    reg_weight: 1.0e-05
+  label: 'P1 movie: persona-only + 5e-3 + reg_weight 1e-5 (against early overfitting)'
+  contribution:
+  - protocol
+  hypothesis: Movie PERSONA는 best epoch 54~75로 MOSAIC(147)보다 훨씬 빨리 정점을 찍고 patience로 끝난다(조기 과적합). L2를 10배로 올리면 정점이
+    늦춰지고 끝점이 올라갈 수 있다.
+  prediction: best epoch 100 이상, MOSAIC 대비 -3~+2%.
+  decision_rule: 5e-3(-4.3%)보다 floor 이상 높음 → reg 3e-5 한 단계 더. 아니면 종료.
+  ledger_id: persona_mosaic-amazon_movie-1103-000029
+- id: q037
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    prior_composition: persona
+    persona_align_weight: 0.005
+  label: 'P1 yelp: 4-view personas + residual + persona-only + 5e-3'
+  contribution:
+  - experts-not-handcrafted
+  hypothesis: one-view yelp는 K=16으로 쪼개지고 2e-2에서 붕괴했다. 4-view(10-27 기본 설정 .0637이 yelp 최고)로 K를 바꾸고 Book 구조(residual,
+    persona-only)를 얹는다.
+  prediction: MOSAIC 대비 -3~+3% (.0626~.0664 N@10).
+  decision_rule: q031(one-view 5e-3)보다 floor 이상 높음 → yelp는 4-view로. G1 타깃(.0701)까지의 거리로 다음 축 결정.
+  ledger_id: persona_mosaic-yelp-1103-001329
+- id: q038
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.002
+  label: 'P1 yelp: persona-only + align 2e-3'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: yelp(2 layers, K=16)에서는 정렬의 유효 구간이 Book보다 훨씬 아래다(2e-2 붕괴; 5e-3은 ep 55에 MOSAIC pace 아래). 2e-3이 '약한
+    정규화' 구간일 수 있다.
+  prediction: -4~+1%.
+  decision_rule: q031/q032와 함께 yelp 정렬 곡선 결정. 최고가 MOSAIC 미만이면 정렬 축 외의 원인(expert 분산, 2 layers)으로 이동.
+  ledger_id: persona_mosaic-yelp-1103-001332
+- id: q039
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+  label: 'P1 movie/yelp: alignment target = MLP(mean of the user''s personas) (new prior_composition=mean)'
+  contribution:
+  - intent-conformity-in-personas
+  - experts-not-handcrafted
+  hypothesis: persona-only 목표는 'expert k의 클러스터에 가장 가까운 facet'인데 gate가 한 expert로 쏠리면 모든 유저가 한 클러스터 기준의 facet 하나로
+    정렬된다. Movie/Yelp 유저는 facet이 2~3개라 그 선택이 임의적일 수 있다. 유저 페르소나 평균(모든 facet)을 목표로 쓰면 목표가 안정되고 유저 전체 취향을 담는다. Book에서도
+    재검(.0918 대비).
+  prediction: 'Movie: MOSAIC -3~+3%. Yelp: ±3%. Book: .090~.094.'
+  decision_rule: 어느 데이터셋이든 현재 최고보다 floor 이상 높음 → 'mean'을 기본 구성으로 승격. 모두 floor 안 → 폐기(코드 복구).
+  needs: '코드: _compose_prior_input / 페르소나 테이블에 ''mean'' 구성 추가(유저: 자기 페르소나 평균; 아이템: 기존 텍스트). tier B 승인 필요. 실험 후 복구
+    여부는 사용자 결정. 판별: (1) 분포 교사 아님 — 기존 persona_align InfoNCE의 목표 벡터 구성만 변경. (2) 증강 그래프 없음. (3) 베이스라인 식 아님. 사용자 승인(2026-11-03).
+    코드 구현·smoke 통과(mean: 3-persona 유저 cos 1.0; fixed: PCA64 81.7% var, 목표 no-grad). 패치: harness/patches/2026-11-03-q039-q040-mean-and-fixed-align-target.patch'
+  ledger_id: persona_mosaic-amazon_movie-1103-004818
+- id: q040
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.005
+    persona_align_target: fixed
+  label: 'P1 yelp/movie: align to a FIXED (detached, frozen-projection) persona target instead of the learned MLP^k
+    output'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 현재 정렬 목표는 학습되는 MLP^k의 출력이라 그래프 임베딩을 따라가며(10-30 corr .69) 정규화 효과가 포화한다. 목표를 고정(페르소나 텍스트의 고정 PCA/선형
+    투영, stop-grad)하면 정렬이 진짜 외부 신호(AUC .80)를 향하게 되어 Yelp처럼 텍스트가 중요한 데이터셋(ProMax +7%)에서 이득이 커질 수 있다. 가중치는 데이터셋별로 다시
+    맞춘다(고정 목표는 더 강하게 작용할 수 있음).
+  prediction: 'Yelp: MOSAIC +2~+6% (G1은 +9% 필요). Movie: -3~+3%. 붕괴 시 가중치 2e-3.'
+  decision_rule: Yelp MOSAIC +4% 이상 → 고정 목표를 기본으로, 가중치 축 재탐색. 미만 → 폐기.
+  needs: '코드: persona_align_target 노브(learned|fixed) — fixed는 페르소나 텍스트(센터링·정규화)를 d차원으로 고정 투영(PCA 또는 seed 고정 랜덤)한
+    벡터를 목표로 쓰고 gradient를 끊음. tier B 승인 필요. 판별: (1) 분포 교사 아님 — 기존 persona_align InfoNCE(인스턴스 수준)의 목표를 고정 벡터로 바꾸는
+    것뿐, 카탈로그 분포 CE(SDR) 아님. (2) 증강 그래프 없음(S2DR 아님). (3) RLMRec KD를 새 손실로 추가하는 것이 아니라 MOSAIC 계승 손실의 목표 변경. 사용자 승인(2026-11-03).
+    코드 구현·smoke 통과(mean: 3-persona 유저 cos 1.0; fixed: PCA64 81.7% var, 목표 no-grad). 패치: harness/patches/2026-11-03-q039-q040-mean-and-fixed-align-target.patch'
+  ledger_id: persona_mosaic-yelp-1103-013025
+- id: q039b
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+  label: 'P1 yelp: alignment target = MLP(mean of the user''s personas)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: q039의 yelp 짝. yelp 유저(K=16, facet 2~3개)에서 facet 하나 대신 평균을 목표로.
+  prediction: MOSAIC 대비 -3~+4%.
+  decision_rule: 'q039(movie)와 함께 판정: 어느 쪽이든 현재 최고보다 floor 이상 높으면 mean 채택.'
+  needs: 'q039와 같은 코드(승인됨). 판별: 분포 교사 아님, 증강 그래프 없음, 베이스라인 식 아님.'
+  ledger_id: persona_mosaic-yelp-1103-020018
+- id: q040b
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.005
+    persona_align_target: fixed
+  label: 'P1 movie: align to a FIXED PCA-64 persona target'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: q040의 movie 짝. 고정 목표가 Movie의 조기 과적합(best ep 54~75)을 늦추는지.
+  prediction: MOSAIC 대비 -3~+3%; 붕괴 시 가중치 2e-3.
+  decision_rule: q040(yelp)과 함께 판정.
+  needs: 'q040과 같은 코드(승인됨). 판별: 인스턴스 수준 InfoNCE 목표 교체, 분포 교사·증강 그래프 아님.'
+  ledger_id: persona_mosaic-amazon_movie-1103-013022
+- id: q041
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.002
+    persona_align_target: fixed
+  label: 'P1 movie: FIXED target with align 2e-3 (q040b rule: lower weight after over-alignment)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 고정 목표는 5e-3에서 ep 54까지 그래프 학습을 눌렀다(학습 목표보다 유효 강도가 큼). 2e-3이면 억제 없이 외부 텍스트 기하로의 약한 정규화만 남을 수 있다.
+  prediction: MOSAIC 대비 -4~+2%; 억제 구간이 ep 20 이내로 짧아짐.
+  decision_rule: persona-only 5e-3(-4.3%)보다 floor 이상 높음 → yelp에도 2e-3 고정 목표. 아니면 Movie에서 고정 목표 폐기.
+  needs: '코드는 q040과 동일(승인됨). 판별: 인스턴스 InfoNCE 목표 교체, 분포 교사·증강 그래프 아님.'
+  ledger_id: persona_mosaic-amazon_movie-1103-023018
+- id: q042
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.002
+  label: 'P1 yelp: mean target + align 2e-3 (combine the two leading yelp variants)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: yelp에서 mean 목표(5e-3, ep 75 val .1273)와 2e-3(persona-only, ep 180 .1302)이 각각 5e-3 persona-only보다 앞서
+    있다. 두 요인은 독립(목표 모양 vs 강도)이므로 더해질 수 있다.
+  prediction: MOSAIC 대비 0~+4%; G1(.0701)에는 못 미칠 가능성이 큼.
+  decision_rule: q039b·q038 결과와 비교해 yelp 표 값 결정; 5e-3 persona-only(.0639)보다 floor 이상 높으면 채택.
+  needs: '승인된 코드(mean). 판별: 분포 교사·증강 그래프 아님.'
+  ledger_id: persona_mosaic-yelp-1103-033052
+- id: q043
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+  repeat: true
+  label: 'P1 movie: mean target 5e-3 REPEAT (is -3.3% vs -4.3% real?)'
+  contribution:
+  - protocol
+  hypothesis: Movie 최고 후보 mean(-3.3%)과 persona-only(-4.3%)의 차이가 floor 안이다. 재실행으로 Movie 표 설정을 정한다.
+  prediction: -2~-5%.
+  decision_rule: 두 실행 평균이 persona-only보다 높으면 Movie 표는 mean. Movie G1은 여전히 미달로 기록.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-amazon_movie-1103-033055
+- id: q044
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+    layer_num: 3
+  label: 'P1 yelp: mean target 5e-3 + 3 propagation layers (yelp block uses 2)'
+  contribution:
+  - protocol
+  hypothesis: yelp 블록의 layer_num 2는 MOSAIC에 맞춰 튜닝된 값이다. PERSONA-MOSAIC은 정렬이 임베딩을 정규화하므로 더 깊은 전파(3 layers, Book·Movie와
+    동일)가 과평활 없이 이득을 줄 수 있다. 데이터셋별 하이퍼파라미터는 모델별로 맞추는 것이 관행(MOSAIC도 데이터셋별 블록).
+  prediction: mean 5e-3(진행 중, val .1314) 대비 ±3%.
+  decision_rule: mean 5e-3보다 floor 이상 높음 → yelp 블록 후보를 3 layers로. 아니면 2 유지.
+  ledger_id: persona_mosaic-yelp-1103-043049
+- id: q045
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+    layer_num: 2
+  label: 'P1 movie: mean target 5e-3 + 2 propagation layers (against early overfitting)'
+  contribution:
+  - protocol
+  hypothesis: Movie PERSONA는 best epoch 75~106으로 MOSAIC(147)보다 일찍 과적합한다. 전파 층을 3→2로 줄이면 모델 용량이 줄어 과적합이 늦춰질 수 있다(MOSAIC
+    movie는 3 layers로 튜닝됨; 모델별 튜닝 관행).
+  prediction: mean 5e-3(-3.3%) 대비 ±3%.
+  decision_rule: mean 5e-3보다 floor 이상 높음 → Movie 블록 후보를 2 layers로. 아니면 3 유지, Movie 백본 축 종료.
+  ledger_id: persona_mosaic-amazon_movie-1103-043052
+- id: q046
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+  repeat: true
+  label: 'P1 yelp: mean target 5e-3 REPEAT (confirm the new yelp best, MOSAIC +1.9%)'
+  contribution:
+  - protocol
+  hypothesis: q039b가 yelp 최고(.0656 N@10, MOSAIC +1.9%, G1 -2.6%)다. 같은 설정 재실행으로 재현 폭을 잰다(yelp 실행 폭은 미측정).
+  prediction: MOSAIC 대비 0~+4%.
+  decision_rule: 두 실행 평균이 MOSAIC 이상이면 yelp 표 설정 = mean 5e-3. G1까지 남은 거리를 두 실행 평균으로 갱신.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-yelp-1103-050043
+- id: q047
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+    item_text: persona
+  label: 'P1 yelp: mean target 5e-3 + item personas (sharper item-side target)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: mean 목표가 유저 쪽 정렬 목표를 개선했다면 아이템 쪽도 같은 공간의 아이템 페르소나(RLMRec 프로필 대신)가 더 선명한 목표일 수 있다. yelp에서 item persona는
+    기본 설정에서 중립(.0636)이었고, Book에서는 2e-2와 결합 시 붕괴했지만 yelp는 5e-3.
+  prediction: mean 5e-3(.0656) 대비 ±3%; 억제 조짐(ep 30 val < .10)이면 과한 정렬.
+  decision_rule: floor 이상 높음 → yelp는 item_text=persona 채택. 아니면 profile 유지.
+  needs: '승인된 코드(mean) + 기존 knob. 판별: 분포 교사·증강 그래프 아님.'
+  ledger_id: persona_mosaic-yelp-1103-050046
+- id: q048
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.001
+  label: 'P1 yelp: mean target + align 1e-3 (extend the weight curve downward)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: yelp persona-only 곡선은 2e-3(-2.6%) > 5e-3(-5.1%) > 1e-2(-8.2%)로 낮을수록 좋았다. mean 목표에서도 2e-3(진행 중)이 5e-3과
+    동급 이상이면 1e-3이 더 나을 수 있다(정렬이 '약한 정규화'일 때 yelp가 최적).
+  prediction: mean 5e-3(.0656) 대비 -2~+3%; 1e-3이 더 좋으면 5e-4도 시험.
+  decision_rule: floor 이상 높음 → 5e-4 한 단계 더. 아니면 yelp 가중치 축 종료(2e-3~5e-3 고정).
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-yelp-1103-053036
+- id: q049
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.002
+  repeat: true
+  label: 'P1 yelp: mean target + 2e-3 REPEAT (confirm yelp best, MOSAIC +2.9%)'
+  contribution:
+  - protocol
+  hypothesis: q042(.0662 N@10, MOSAIC +2.9%, G1 -1.6%)가 yelp 최고. 재실행으로 확인(yelp 재현 폭은 mean 5e-3 재실행 q046으로도 측정 중).
+  prediction: MOSAIC +1~+4%.
+  decision_rule: 두 실행 평균으로 yelp 표 설정 확정(mean + 2e-3). G1 거리 갱신.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-yelp-1103-080048
+- id: q050
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.003
+  label: 'P1 yelp: mean target + 3e-3 (between 2e-3 and 5e-3)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 'mean 목표의 yelp 가중치 곡선: 1e-3(진행 중 val .1301) ≈ 2e-3(.0662) > 5e-3(.0656). 정점이 2e-3~5e-3 사이에 있을 수 있어
+    3e-3을 잰다.'
+  prediction: 2e-3과 floor 안이거나 약간 위.
+  decision_rule: 2e-3보다 floor 이상 높음 → 3e-3 채택·재실행. 아니면 yelp 가중치 축 종료(2e-3).
+  ledger_id: persona_mosaic-yelp-1103-080051
+- id: q051
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.02
+  label: 'P2/structure: Book best with the mean-persona target (unify the target composition across datasets)'
+  contribution:
+  - experts-not-handcrafted
+  - protocol
+  hypothesis: Movie(+1점)·Yelp(+2.7점)에서 페르소나 평균 목표가 facet 하나보다 나았다. Book(persona-only .0918)에서도 같거나 낫다면 세 데이터셋의 목표
+    구성을 mean으로 통일할 수 있다. GPU가 비어 P1 밖이지만 구조 통일 판단에 필요.
+  prediction: N@10 .089~.094; floor 안이면 mean으로 통일(단순성).
+  decision_rule: persona-only(.0918) 대비 floor 안 또는 위 → 세 데이터셋 공통 구성 = mean. floor 이상 아래 → Book만 persona-only로 두고
+    논문에 데이터셋별 구성으로 기록.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-amazon_book-1103-100050
+- id: q052
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.02
+    embedding_size: 32
+  label: 'P2 Book G3: best config at d=32 vs ProMax d=32'
+  contribution:
+  - protocol
+  hypothesis: G3 = PERSONA-MOSAIC d=32가 ProMax d=32(+4% 선 .0704/.1109/.0727/.0867)를 넘는 것. Book 기본 설정 d=32는 .0757
+    N@10(-8.5%)였다. G1 확정 설정(d=64 .0918)을 d=32로 옮기면 d=64→32 손실(기본 설정에서 -9.5%)을 감안해 ~.083 예상. GPU 0이 비어 P1 밖이지만 G3
+    거리 측정.
+  prediction: N@10 .080~.086 → G3 -1~-8%.
+  decision_rule: G3 평균 +4% 이상이면 재실행으로 확정. 미만이면 G3는 d=32 전용 튜닝(정렬 가중치 재조정) 필요로 기록.
+  ledger_id: persona_mosaic-amazon_book-1103-103043
+- id: q053
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_book
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: persona
+    persona_align_weight: 0.005
+    embedding_size: 32
+  label: 'P2 Book G3: best structure at d=32 with align 5e-3 (d=32-specific weight)'
+  contribution:
+  - protocol
+  hypothesis: d=32에서 Book 최고 설정(정렬 2e-2)은 .0747 N@10으로 d=32 기본 설정(.0757)보다도 낮았다 → 임베딩 폭이 절반이면 같은 정렬 가중치가 과하다(Movie/Yelp와
+    같은 현상). 5e-3으로 낮추면 d=32 기본값 이상으로 회복될 수 있다.
+  prediction: N@10 .078~.084 (ProMax d=32 .0833 근처); G3(+4% = .0867)는 미달 가능성이 큼.
+  decision_rule: 5e-3이 2e-2보다 floor 이상 높음 → d=32 가중치 축(1e-2, 2e-3)으로 G3 거리 탐색. 아니면 d=32 구조 자체 문제로 기록.
+  ledger_id: persona_mosaic-amazon_book-1103-110040
+- id: q054
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: learned
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.002
+  label: 'P1 yelp: mean + 2e-3 with the learned (MOSAIC) gate instead of residual'
+  contribution:
+  - weighted-gate
+  hypothesis: Book에서 residual gate는 learned보다 2.5~3점 높았지만 yelp(K=16, mean 입력은 expert 간 동일)에서는 클러스터 logits가 라우팅을
+    .72/.02×15로 고정해 오히려 방해할 수 있다. learned gate(MOSAIC MLP만)로 바꿔 yelp에서 gate 종류의 효과를 본다.
+  prediction: mean+2e-3(.0662) 대비 ±3%. 더 높으면 yelp는 learned gate.
+  decision_rule: floor 이상 높음 → yelp 표 설정의 gate를 learned로(구조는 데이터셋별 gate 종류로 기록). 아니면 residual 유지.
+  needs: '승인된 코드(mean). 판별: 손실 변경 없음.'
+  ledger_id: persona_mosaic-yelp-1103-113107
+- id: q055
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+    llm_align_temperature: 0.5
+  label: 'P1 yelp: mean target, align 5e-3 with a SOFTER InfoNCE (temperature 0.5)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: yelp에서 정렬 최적점이 1e-3~3e-3(아주 약함)에 있고 더 세면 바로 손해다 → InfoNCE(온도 .2)가 너무 날카로워 소수의 hard negative가 임베딩을
+    끌어당기는 것일 수 있다. 온도를 .5로 올리면 같은 가중치에서 더 부드러운 '전역' 정규화가 되어 더 센 가중치(5e-3)를 수용할 수 있다. (온도 .1은 Book에서 붕괴 — 반대 방향은
+    미시험.)
+  prediction: mean+2e-3(.0662) 대비 ±3%; 억제 구간이 짧아짐.
+  decision_rule: floor 이상 높음 → 온도 .5에서 가중치 1e-2 한 단계 더. 아니면 온도 축 완전 종료.
+  ledger_id: persona_mosaic-yelp-1103-120125
+- id: q057
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.002
+    item_text: audience
+  label: 'P1 yelp/movie: item-side target = mean persona of the item''s training users (audience persona)'
+  contribution:
+  - intent-conformity-in-personas
+  - experts-not-handcrafted
+  hypothesis: '아이템 쪽 정렬 목표는 RLMRec 프로필(다른 텍스트 공간, 유저 평균으로 센터링)이거나 아이템 페르소나(중립)였다. 아이템을 ''그 아이템을 소비한 훈련 유저들의 페르소나
+    평균''(audience persona)으로 표현하면 유저·아이템 목표가 같은 페르소나 공간에 놓이고, 그래프에서 파생된 텍스트 신호(offline: 아이템 페르소나와 audience 평균의 cos
+    .33~.50)가 된다. 유저 평균 목표가 Movie·Yelp에서 이득을 낸 것과 같은 논리의 아이템 판.'
+  prediction: yelp mean+2e-3(.0662) 대비 0~+4%; Movie에도 적용.
+  decision_rule: floor 이상 높음 → item_text=audience를 P1 기본 구성으로, Movie에도 실행. 아니면 폐기.
+  needs: '코드: item_text=audience — trn_mat(훈련 상호작용)로 아이템별 유저 persona-mean의 평균을 계산해 단위 정규화한 아이템 텍스트 테이블(상호작용 없는 아이템은
+    0). 테스트 상호작용은 쓰지 않음. tier B 승인 필요. 판별: (1) 분포 교사 아님 — 기존 InfoNCE의 아이템 목표 벡터 구성 변경 (2) 증강 그래프 없음 (3) 베이스라인 식
+    아님(MOSAIC의 community prior와 다른, 페르소나 기반 audience 표현). 사용자 승인(2026-11-03 15:20). 구현·smoke 통과(Book: 아이템 행 = 훈련
+    유저 평균의 단위 평균, cos 1.0; 패치 harness/patches/2026-11-03-q057-audience-item-text.patch).'
+  ledger_id: persona_mosaic-yelp-1103-135633
+- id: q056
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+    llm_align_temperature: 0.5
+  label: 'P1 movie: mean target 5e-3 with a SOFTER InfoNCE (temperature 0.5)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: Movie는 정렬이 조금만 세도(1e-2) 손해이고 best epoch이 이르다(조기 과적합). 온도 .5의 부드러운 InfoNCE는 hard negative 압력을 줄여 같은
+    가중치에서 더 완만한 정규화가 되므로 과적합을 늦출 수 있다(yelp q055와 짝).
+  prediction: mean 5e-3(-3.3%) 대비 ±3%; best epoch 100 이상이면 과적합 완화.
+  decision_rule: floor 이상 높음 → 온도 .5 + 1e-2 한 단계 더. 아니면 Movie 온도 축 종료.
+  ledger_id: persona_mosaic-amazon_movie-1103-123032
+- id: q057b
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+    item_text: audience
+  label: 'P1 movie: audience-persona item target (q057 companion)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: q057의 Movie 짝(Movie 최고 mean 5e-3 위에 아이템 audience 목표).
+  prediction: mean 5e-3(-3.3%) 대비 ±3%.
+  decision_rule: q057과 함께 판정.
+  needs: 승인된 코드(audience).
+  ledger_id: persona_mosaic-amazon_movie-1103-135636
+- id: q058
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.01
+    llm_align_temperature: 0.5
+  label: 'P1 yelp: mean target, align 1e-2 with temperature 0.5 (does the softer loss tolerate more weight?)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 온도 .2에서 1e-2는 -8.2%(그래프 소멸)였다. 온도 .5의 5e-3이 2e-3과 동급이었으므로, 부드러운 손실이 더 센 가중치를 수용해 정규화 이득을 키울 수 있는지
+    본다.
+  prediction: (a) N@10 .067 이상(G1 거리 축소) 또는 (c) 억제/붕괴.
+  decision_rule: (a) → 온도 .5 + 2e-2. (c) 또는 동급 → 온도 축 최종 종료, yelp 표 설정 유지.
+  ledger_id: persona_mosaic-yelp-1103-153043
+- id: q059
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+    item_text: audience
+  label: 'P1 yelp: audience item target with align 5e-3 (second weight point for audience)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: yelp audience(2e-3, 진행 중)는 val이 mean+2e-3보다 이르게 오른다. 아이템 목표가 그래프 파생이라 유저 목표와 결이 맞으면 더 센 정렬(5e-3)을
+    수용할 수 있다.
+  prediction: audience 2e-3 결과 대비 ±3%.
+  decision_rule: q057과 함께 yelp audience 채택/폐기 판정(둘 중 높은 쪽이 mean+2e-3 2회 평균 .0657보다 floor 이상 높으면 채택).
+  needs: 승인된 코드(audience).
+  ledger_id: persona_mosaic-yelp-1103-161955
+- id: q060
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: learned
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+  label: 'P1 movie: mean 5e-3 with the learned gate (gate-type check on Movie)'
+  contribution:
+  - weighted-gate
+  hypothesis: Movie에서 gate 종류(residual vs learned)는 미시험(Book residual +2.5~3점, yelp -1점). K=10인 Movie에서 클러스터 logits가
+    도움/방해인지 소거.
+  prediction: mean 5e-3(-3.3%) 대비 ±3%.
+  decision_rule: floor 이상 높음 → Movie gate를 learned로. 아니면 residual 유지, Movie gate 축 종료.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-amazon_movie-1103-161958
+- id: q061
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.002
+    top_k: 1
+  label: 'P1 yelp: mean + 2e-3 with hard routing (top_k=1) — is the .72/.02x15 mixture helping?'
+  contribution:
+  - moe
+  - weighted-gate
+  hypothesis: yelp(K=16)에서 mean 입력은 expert 간 동일해 gate가 .72/.02×15의 혼합을 만든다(완전 쏠림 아님). 이 혼합이 16개 expert의 free 임베딩을
+    조금씩 섞는 앙상블 효과인지, 아니면 잡음인지 top_k=1(하드 라우팅, 노드당 expert 하나)로 소거한다.
+  prediction: mean+2e-3(2회 평균 .0657) 대비 ±2%.
+  decision_rule: floor 이상 낮음 → 혼합이 유효(앙상블) → 큐에 'top_k=3' 추가. 높음 → yelp는 top_k=1. 동급 → 무관.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-yelp-1103-163038
+- id: q062
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.007
+  label: 'P1 movie: mean target + 7e-3 (refine the sharp 5e-3 peak)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 'Movie mean 곡선: 2e-3 -9.4%(persona-only), 5e-3 -3.3%, 1e-2 -12.6%(persona-only) — 정점이 날카롭다. 5e-3과
+    1e-2 사이(7e-3)에 더 높은 점이 있을 수 있다.'
+  prediction: -2~-5%.
+  decision_rule: 5e-3보다 floor 이상 높음 → 8e-3 한 단계 더. 아니면 Movie 가중치 축 최종 종료.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-amazon_movie-1103-163041
+- id: q063
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+    gate_warmup_epochs: 15
+  label: 'P1 movie: mean 5e-3 + gate warm-up 15 (all 10 experts trained before the gate chooses)'
+  contribution:
+  - moe
+  - weighted-gate
+  hypothesis: Movie gate는 ep 30 전에 10개 중 하나로 쏠린다. 15 epoch 균등 워밍업(일시 스케줄, 최종 gate는 가중)으로 모든 expert가 학습된 뒤 gate가
+    고르면 쏠림 대상과 끝점이 달라질 수 있다(Book에서는 learned+warm-up+balance가 -; 여기서는 balance 없이 warm-up만).
+  prediction: mean 5e-3(-3.3%) 대비 ±3%.
+  decision_rule: floor 이상 높음 → warm-up 30 시험. 아니면 Movie warm-up 축 종료.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-amazon_movie-1103-170049
+- id: q064
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.002
+    gate_warmup_epochs: 15
+  label: 'P1 yelp: mean + 2e-3 + gate warm-up 15'
+  contribution:
+  - moe
+  - weighted-gate
+  hypothesis: q063의 yelp 짝. K=16에서 워밍업 뒤 gate가 다른 혼합으로 수렴하는지.
+  prediction: mean+2e-3(.0657) 대비 ±2%.
+  decision_rule: q063과 함께 판정.
+  needs: 승인된 코드(mean). 첫 실행 실패(OOM 추정) → 재실행.
+  ledger_id: persona_mosaic-yelp-1103-173055
+- id: q065
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.008
+  label: 'P1 movie: mean target + 8e-3 (q062 rule: one step up from the 7e-3 gain)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 7e-3이 -1.6%(5e-3 -3.3%)로 Movie 최고. 정점이 7e-3보다 위일 수 있어 8e-3을 잰다(1e-2는 persona-only에서 -12.6%였으므로 상한
+    가까움).
+  prediction: -4~0%.
+  decision_rule: 7e-3보다 높음 → 9e-3. 낮음 → 7e-3 정점 확정.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-amazon_movie-1103-173049
+- id: q066
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.007
+  repeat: true
+  label: 'P1 movie: mean target 7e-3 REPEAT (confirm the -1.6%)'
+  contribution:
+  - protocol
+  hypothesis: 7e-3(-1.6%)과 5e-3(-3.3%)의 차이는 개별 지표로 floor 안이다. 재실행으로 Movie 표 설정을 정한다.
+  prediction: -4~0%.
+  decision_rule: 두 실행 평균이 5e-3보다 높으면 Movie 표 = 7e-3.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-amazon_movie-1103-173052
+- id: q067
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.006
+  label: 'P1 movie: mean target + 6e-3 (fill the curve between 5e-3 and the 7e-3 peak)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 5e-3 -3.3%, 7e-3 -1.8%(2회), 8e-3 -3.5% — 정점이 6~7e-3 사이에 있을 수 있다. 곡선을 채워 Movie 표 가중치를 확정한다.
+  prediction: -1~-3%.
+  decision_rule: 7e-3 2회 평균보다 높으면 6e-3 재실행; 아니면 7e-3 확정.
+  needs: 승인된 코드(mean).
+  ledger_id: persona_mosaic-amazon_movie-1103-183052
+- id: q068
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.007
+    layer_modulation_scale: 0.5
+  label: 'P1 movie: mean 7e-3 with a weaker layer-wise modulation (scale 0.5; movie block uses 1.0)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 진단에서 modulation gate는 노드 무관 마스크(mean|gate-1| ≈ .9~1.0 → 차원별로 ≈0 또는 ≈2)로 퇴화해 층마다 임베딩을 깎는다. Movie·Yelp의
+    E_free 노름이 .003(Book 1.0)으로 극히 작은 것과 맞물려, 마스크가 과도하게 차원을 끄는 것일 수 있다. scale을 .5로 내리면 gate ∈ (.5, 1.5)로 완화된다.
+  prediction: 7e-3(-1.8%) 대비 ±3%; E_free 노름 증가.
+  decision_rule: floor 이상 높음 → scale .25/0 시험. 아니면 1.0 유지.
+  needs: 승인된 코드(mean) + 기존 knob.
+  ledger_id: persona_mosaic-amazon_movie-1103-200108
+- id: q069
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.007
+    layer_modulation_scale: 0.0
+  label: 'P1 movie: mean 7e-3 with the modulation OFF (scale 0: plain LightGCN experts + alignment)'
+  contribution:
+  - intent-conformity-in-personas
+  - moe
+  hypothesis: 'q068의 극단: modulation을 끄면(gate=1) prior는 정렬 목표로만 쓰인다. Movie에서 modulation 경로가 돕는지 해치는지 소거한다(Book 진단:
+    경로가 사실상 무의미).'
+  prediction: 7e-3 대비 -2~+2%.
+  decision_rule: 동급 이상 → Movie에서 modulation 경로 제거 가능(단순화). 낮음 → 유지.
+  needs: 승인된 코드(mean) + 기존 knob.
+  ledger_id: persona_mosaic-amazon_movie-1103-200111
+- id: q070
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.005
+    persona_align_side: user
+  label: 'P1 yelp/movie: alignment on the USER side only (drop the item-side term)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 아이템 쪽 정렬 목표는 어떤 형태(profile/persona/audience)로도 중립이었고, 정렬 가중치의 유효 구간은 좁다. 아이템 항을 빼면 아이템 임베딩은 BPR만으로
+    자유롭게 움직이고, 유저 항에 더 센 가중치(5e-3~1e-2)를 쓸 수 있다. 양쪽을 같은 가중치로 묶은 것이 Movie·Yelp에서 최적점을 낮게 고정했을 수 있다.
+  prediction: yelp mean+2e-3(.0657) 대비 0~+4%; Movie에도 적용.
+  decision_rule: floor 이상 높음 → side=user를 P1 기본으로, 유저 가중치 축 재탐색. 아니면 폐기.
+  needs: '코드: persona_align_side 노브(both|user|item) — _persona_alignment_loss에서 해당 항만 계산. tier B 승인 필요. 판별: (1)
+    분포 교사 아님 (2) 증강 그래프 없음 (3) 베이스라인 식 아님(자체 손실의 적용 범위 변경). 사용자 승인(2026-11-04). 구현·smoke 통과(side: both = user +
+    item 정확히 분해; decay 60: ep0 2e-2, ep30 1e-2, ep60 0). 패치 harness/patches/2026-11-04-q070-q071-align-side-and-decay.patch'
+  ledger_id: persona_mosaic-yelp-1103-223019
+- id: q071
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.02
+    persona_align_decay_epochs: 60
+  label: 'P1 movie/yelp: alignment weight that DECAYS linearly to 0 over the first N epochs (strong early regulariser,
+    free late training)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: Book 2e-2 곡선은 초반 억제 뒤 회복해 끝점이 높고, Movie·Yelp는 센 가중치가 끝까지 남아 그래프를 죽인다. 가중치를 초반에만 세게(2e-2) 주고 60 epoch에
+    걸쳐 0으로 줄이면 '정렬이 초기 임베딩 기하를 잡아 주는' 효과만 남기고 후반 억제를 없앨 수 있다(trainer의 set_epoch 훅으로 epoch을 이미 받음).
+  prediction: Movie 7e-3(-1.8%) 대비 -2~+4%.
+  decision_rule: floor 이상 높음 → 감쇠 길이(30/120)·시작값 축. 아니면 폐기.
+  needs: '코드: persona_align_decay_epochs 노브 — set_epoch에서 현재 가중치 = base × max(0, 1 − epoch/N)(N=0이면 상수). tier B
+    승인 필요. 판별: (1)(2)(3) 모두 아님 — 자체 손실의 가중치 스케줄. 사용자 승인(2026-11-04). 구현·smoke 통과(side: both = user + item 정확히 분해;
+    decay 60: ep0 2e-2, ep30 1e-2, ep60 0). 패치 harness/patches/2026-11-04-q070-q071-align-side-and-decay.patch'
+  ledger_id: persona_mosaic-amazon_movie-1103-230018
+- id: q072
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.002
+    top_k: 3
+  label: 'P1 yelp: mean + 2e-3 with top_k=3 (more experts in the mixture)'
+  contribution:
+  - moe
+  - weighted-gate
+  hypothesis: top_k=1은 -16.6%(top_k=2 대비 10점 하락) → yelp에서 expert 혼합이 성능을 만든다. 혼합 폭을 3으로 늘리면 더 나아질 수 있다(K=16).
+  prediction: top_k=2(.0657) 대비 -2~+4%.
+  decision_rule: floor 이상 높음 → top_k=4/6 축 탐색(q073과 비교). 낮음 → 2 유지.
+  needs: 승인된 코드(mean) + 기존 knob.
+  ledger_id: persona_mosaic-yelp-1103-213049
+- id: q073
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.002
+    top_k: 4
+  label: 'P1 yelp: mean + 2e-3 with top_k=4'
+  contribution:
+  - moe
+  - weighted-gate
+  hypothesis: 'q072의 다음 점. 혼합 폭-성능 곡선(1: -16.6%, 2: -2.5%, 3: ?, 4: ?)을 그린다.'
+  prediction: top_k=2 대비 -3~+4%.
+  decision_rule: q072와 함께 yelp top_k 결정; 단조 증가면 8까지 확장.
+  needs: 승인된 코드(mean) + 기존 knob.
+  ledger_id: persona_mosaic-yelp-1103-213052
+- id: q070b
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.007
+    persona_align_side: user
+  label: 'P1 movie: alignment on the USER side only (q070 companion), 7e-3'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: q070의 Movie 짝. 아이템 항을 빼면 Movie 최적 가중치(7e-3)가 위로 이동할 수 있어 7e-3을 기준점으로 먼저 잰다.
+  prediction: mean 7e-3(-1.8%) 대비 ±3%.
+  decision_rule: q070과 함께 side=user 채택/폐기(세 데이터셋 검증 후 shared_structure 갱신).
+  needs: 승인된 코드(side).
+  ledger_id: persona_mosaic-amazon_movie-1103-220139
+- id: q071b
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.02
+    persona_align_decay_epochs: 60
+  label: 'P1 yelp: alignment 2e-2 decaying to 0 over 60 epochs (q071 companion)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: yelp에서 상수 2e-2는 그래프를 죽였다(-22%). 초반 60 epoch만 세게 걸고 0으로 줄이면 초기 기하 정렬 효과만 남을 수 있다.
+  prediction: mean+2e-3(.0657) 대비 -3~+4%; 억제가 ep 60 전에 풀리는지가 관건.
+  decision_rule: q071과 함께 판정; 좋으면 감쇠 길이/시작값 축(데이터셋별 하이퍼파라미터).
+  needs: 승인된 코드(decay).
+  ledger_id: persona_mosaic-yelp-1104-003018
+- id: q074
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.007
+    top_k: 3
+  label: 'P1 movie: mean 7e-3 with top_k=3 (mixture width on Movie, K=10)'
+  contribution:
+  - moe
+  hypothesis: top_k는 데이터셋별 하이퍼파라미터(>=2). Movie(K=10)에서 혼합 폭 3이 top-2(한 expert .99 쏠림)와 다른 혼합을 만드는지 소거한다(yelp 3/4는
+    동급 pace).
+  prediction: 7e-3 top_k=2(-1.8%) 대비 ±2%.
+  decision_rule: floor 이상 높음 → Movie top_k=3 채택(하이퍼파라미터). 아니면 2 유지.
+  ledger_id: persona_mosaic-amazon_movie-1104-003047
+- id: q075
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.007
+    top_k: 4
+  label: 'P1 movie: mean 7e-3 with top_k=4'
+  contribution:
+  - moe
+  hypothesis: q074의 다음 점.
+  prediction: ±2%.
+  decision_rule: q074와 함께 Movie top_k 결정.
+  ledger_id: persona_mosaic-amazon_movie-1104-010018
+- id: q076
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mix
+    persona_align_weight: 0.007
+    top_k: 4
+  label: 'P1 all datasets: prior_composition=mix — user target = unit(facet closest to cluster k + mean of all personas)'
+  contribution:
+  - experts-not-handcrafted
+  - moe
+  - intent-conformity-in-personas
+  hypothesis: 'facet 목표는 Book에서 +8.1%(mean +4.9%), mean 목표는 Movie·Yelp에서 facet보다 1~3점 위다. 두 구성을 섞은 목표(expert k:
+    클러스터 k에 가장 가까운 facet과 페르소나 평균의 단위 합)는 (1) expert마다 입력이 달라져 gate 쏠림 상태에서도 expert 다양성이 생기고 (2) 평균의 안정성을 유지한다.
+    세 데이터셋에서 facet·mean 각각의 최고에 근접하거나 넘으면 공유 구조를 mix로 바꿀 수 있다.'
+  prediction: Book .089~.093(N@10), Movie -3~0%, Yelp -3~-1%.
+  decision_rule: 세 데이터셋 모두 현 shared_structure(mean) 결과 이상이면 shared_structure.prior_composition=mix로 채택(하이퍼파라미터는
+    데이터셋별 재조정 허용). 한 곳이라도 floor 이상 낮으면 폐기.
+  approved: 사용자 2026-11-04 09:48 ("승인해"); top_k=4는 현재 Movie 하이퍼파라미터라 추가. 패치 harness/patches/2026-11-04-q076-mix-composition.patch
+  needs: '코드: PRIOR_COMPOSITIONS에 ''mix'' 추가 — 유저 행 = l2norm(facet_k + mean), 아이템은 기존 텍스트. _node_text_rows/_compose_prior_input
+    수정, swap 진단은 index와 mean 테이블을 함께 permute. tier B 승인 필요. 판별: (1) 분포 교사 아님 (2) 증강 그래프 없음 (3) 베이스라인 식 아님(정렬 목표
+    벡터 구성).'
+  ledger_id: persona_mosaic-amazon_movie-1104-095519
+- id: q077
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.007
+    top_k: 6
+  label: 'P1 movie: mean 7e-3 with top_k=6 (extend the mixture-width curve)'
+  contribution:
+  - moe
+  hypothesis: Movie 혼합 폭 곡선 2 -1.8, 3 -2.6, 4 -0.1(최고). 더 넓은 혼합(6)이 더 나을 수 있다(K=10).
+  prediction: top_k=4(-0.1%) 대비 ±2%.
+  decision_rule: 4보다 floor 이상 높음 → 8(q078)과 비교해 채택. 아니면 4 확정.
+  ledger_id: persona_mosaic-amazon_movie-1104-020106
+- id: q078
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.007
+    top_k: 8
+  label: 'P1 movie: mean 7e-3 with top_k=8'
+  contribution:
+  - moe
+  hypothesis: q077의 다음 점(K=10 중 8).
+  prediction: ±2%.
+  decision_rule: q077과 함께 Movie top_k 결정.
+  ledger_id: persona_mosaic-amazon_movie-1104-020109
+- id: q079
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.002
+    top_k: 6
+  label: 'P1 yelp: mean + 2e-3 with top_k=6 (extend the mixture-width curve)'
+  contribution:
+  - moe
+  hypothesis: 'yelp 혼합 폭 곡선: 1 -16.6, 2 -1.6, 3 (진행 중), 4 -0.7(최고). 6이 더 나을 수 있다(K=16).'
+  prediction: top_k=4(-0.7%) 대비 ±2%; +0.7점이면 G1 달성.
+  decision_rule: 4보다 높음 → 8(q080)과 비교해 채택. 아니면 4 확정.
+  ledger_id: persona_mosaic-yelp-1104-023129
+- id: q080
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    persona_align_weight: 0.002
+    top_k: 8
+  label: 'P1 yelp: mean + 2e-3 with top_k=8'
+  contribution:
+  - moe
+  hypothesis: q079의 다음 점(K=16 중 8).
+  prediction: ±2%.
+  decision_rule: q079와 함께 yelp top_k 결정.
+  ledger_id: persona_mosaic-yelp-1104-030018
+- id: q081
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.005
+  label: 'P1 movie: top_k=4 with align 5e-3 (re-tune the weight at the new mixture width)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 7e-3은 top_k=2에서 맞춘 값이다. top-4 혼합에서는 유효 정렬 강도가 달라져 최적 가중치가 이동할 수 있다(아래쪽 점).
+  prediction: top_k=4 7e-3(-0.1%) 대비 ±2%.
+  decision_rule: 7e-3보다 높음 → 채택. 아니면 7e-3 유지.
+  ledger_id: persona_mosaic-amazon_movie-1104-030106
+- id: q082
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.01
+  label: 'P1 movie: top_k=4 with align 1e-2 (upper weight point at the new mixture width)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: q081의 반대쪽 점. top_k=2에서 1e-2는 -12.6%(persona-only)였지만 mean 목표 + top-4 혼합에서는 다를 수 있다.
+  prediction: -4~+2%.
+  decision_rule: q081과 함께 Movie 가중치(top_k=4) 결정; 어느 쪽이 +4% 넘으면 G1 달성 → achieved.
+  ledger_id: persona_mosaic-amazon_movie-1104-033019
+- id: q083
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.008
+  label: 'P1 movie: top_k=4 with align 8e-3 (between 7e-3 and 1e-2 at the new width)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: top_k=4에서 5e-3(-5.5%) < 7e-3(-0.1%). 정점이 7e-3보다 위일 수 있어 8e-3을 잰다(1e-2는 진행 중).
+  prediction: -3~+2%.
+  decision_rule: 7e-3보다 높음 → 채택(G1 +4% 넘으면 achieved). 아니면 7e-3 확정.
+  ledger_id: persona_mosaic-amazon_movie-1104-040050
+- id: q084
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 5
+    persona_align_weight: 0.007
+  label: 'P1 movie: mean 7e-3 with top_k=5 (fill the width curve between 4 and 6)'
+  contribution:
+  - moe
+  hypothesis: 'Movie 폭 곡선 4 -0.1 > 6 -3.9: 4와 6 사이(5)에 정점이 있는지 채운다.'
+  prediction: -3~+1%.
+  decision_rule: 4보다 높음 → 5 채택. 아니면 4 확정.
+  ledger_id: persona_mosaic-amazon_movie-1104-043049
+- id: q085
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.005
+  label: 'P1 yelp: top_k=4 with align 5e-3 (re-tune the weight at the new mixture width)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: 'Movie에서 top-4 혼합은 센 정렬을 top-2보다 훨씬 잘 견뎠다(1e-2: -12.6% → -1.6%). yelp(top_k=4, 2e-3 → G1 -0.7%)에서도
+    가중치 최적점이 위로 이동했을 수 있다; 5e-3은 top_k=2에서 2e-3과 동급이었다.'
+  prediction: top_k=4 2e-3(-0.7%) 대비 -2~+2%; +0.7점이면 G1 달성.
+  decision_rule: 2e-3보다 높음 → 채택(+4% 넘으면 achieved), 1e-2 한 단계 더. 아니면 2e-3 유지.
+  ledger_id: persona_mosaic-yelp-1104-053022
+- id: q086
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.01
+  label: 'P1 yelp: top_k=4 with align 1e-2 (upper weight point at the new width)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: Movie에서 top-4는 1e-2를 -1.6%로 견뎠다(top-2 -12.6%). yelp top_k=4에서도 센 정렬이 수용되면 정규화 이득이 커질 수 있다(top-2 1e-2는
+    -8.2%).
+  prediction: top_k=4 2e-3(-0.7%) 대비 -4~+2%.
+  decision_rule: q085(5e-3)와 함께 yelp 가중치(top_k=4) 결정; +4% 넘으면 achieved.
+  ledger_id: persona_mosaic-yelp-1104-060050
+- id: q087
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.003
+  label: 'P1 yelp: top_k=4 with align 3e-3 (fine point just above 2e-3)'
+  contribution:
+  - intent-conformity-in-personas
+  hypothesis: top_k=2에서 2e-3~5e-3은 평탄했다. top_k=4의 정점이 2e-3 바로 위일 수 있어 3e-3을 잰다.
+  prediction: ±1.5%.
+  decision_rule: q085/q086과 함께 결정.
+  ledger_id: persona_mosaic-yelp-1104-060053
+- id: q088
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.007
+    layer_modulation_scale: 2.0
+  label: 'P1 movie: top_k=4 + 7e-3 with layer_modulation_scale=2.0 (lambda sits at the 1.0 cap)'
+  contribution:
+  - moe
+  - intent-conformity-in-personas
+  hypothesis: 'Movie 최고(1104-010018)의 사용 expert 3은 modulation lambda가 네 층 모두 1.000 = 상한(layer_modulation_scale)이고
+    mean|gate-1| .87~.96으로 tanh도 포화 — 모델이 더 센 prior 조건부 층 변조를 원한다. Movie scale 곡선 0 → -7.6%, 0.5 → -9.4%, 1.0 →
+    -0.1%: 상한을 2.0으로 올리면 곡선이 더 오를 수 있다. (하이퍼파라미터, 구조 노브 아님.)'
+  prediction: G1 -3% ~ +2% (현 -0.1%). 잡음 폭 밖(+1점 이상)이면 변조 축 재개.
+  decision_rule: 1.0 대비 +1점 이상 → 3.0 추가 + yelp q089와 함께 데이터셋별 scale 재조정. 잡음 안 → 1.0 유지(변조 축 종료). 더 나쁨 → 1.0이 정점,
+    축 종료.
+  ledger_id: persona_mosaic-amazon_movie-1104-070815
+- id: q089
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.002
+    layer_modulation_scale: 2.0
+  label: 'P1 yelp: top_k=4 + 2e-3 with layer_modulation_scale=2.0 (lambda sits at the 1.0 cap)'
+  contribution:
+  - moe
+  - intent-conformity-in-personas
+  hypothesis: Yelp 최고(1103-213052)의 사용 expert 9도 modulation lambda [1.0,1.0,1.0] = 상한, mean|gate-1| .98~.995로 포화.
+    yelp는 scale을 한 번도 바꾸지 않았다(블록 1.0). 상한 2.0이면 층 배율 범위가 [0,2] → [-1,3]으로 넓어진다. Movie q088과 같은 축의 데이터셋별 점.
+  prediction: G1 -3% ~ +2% (현 -0.7%).
+  decision_rule: top_k=4 2e-3(-0.7%) 대비 +1점 이상 → 3.0 추가, scale을 yelp 하이퍼파라미터로 채택. 잡음 안 → 1.0 유지. 더 나쁨 → 축 종료.
+  ledger_id: persona_mosaic-yelp-1104-070820
+- id: q090
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.007
+    keep_rate: 0.8
+  label: 'P1 movie: top_k=4 + 7e-3 with edge dropout keep_rate=0.8 (against early overfitting)'
+  contribution:
+  - moe
+  hypothesis: Movie는 best epoch 78~100에서 멈추고 val/test 격차가 크다(조기 과적합). keep_rate(ExpertGCN 전파 시 edge dropout, 학습
+    시에만)는 어떤 데이터셋에서도 바꾼 적이 없다(기본 1.0 = dropout 없음). 0.8이면 전파 그래프가 매 epoch 달라져 과적합이 늦춰지고 best epoch이 뒤로 밀릴 수 있다.
+    훈련 하이퍼파라미터(구조 노브 아님).
+  prediction: G1 -3% ~ +2% (현 -0.1%), best epoch 100 이상.
+  decision_rule: 1.0 대비 +1점 이상 → 0.6 추가, yelp에도 0.8 적용. 잡음 안 → 1.0 유지. 더 나쁨 → 축 종료.
+  ledger_id: persona_mosaic-amazon_movie-1104-073120
+- id: q091
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.007
+    layer_modulation_lambda_init: 0.05
+    layer_modulation_init_std: 0.01
+  label: 'P1 movie: top_k=4 + 7e-3 with the yelp-block modulation init (lambda_init 5e-2, init_std 1e-2)'
+  contribution:
+  - moe
+  hypothesis: q088(scale 2.0)은 최종 lambda가 1.0~1.24로 scale 1.0과 거의 같았는데도 -4점 → 차이는 초기 궤적(초반 변조 강도, 쏠림 시점 ep 30→60)에서
+    났다. Movie는 변조 초기값이 기본(lambda_init 1e-2, init_std 1e-3 = 거의 항등으로 시작)이고 Yelp 블록은 5e-2/1e-2로 더 세게 시작한다. Movie에서
+    변조 초기값은 바꾼 적이 없다(Book에서는 무변화). 더 센 초기 변조가 Movie의 조기 과적합 전 prior 사용을 앞당길 수 있다. 하이퍼파라미터(구조 아님).
+  prediction: G1 -3% ~ +1.5% (현 -0.1%). Book 선례(무변화)대로 잡음 안일 확률이 높다.
+  decision_rule: 기본 대비 +1점 이상 → 초기값 축 재개(1e-1/3e-2 점 추가). 잡음 안 → 기본 유지, 축 종료. 더 나쁨 → 축 종료.
+  ledger_id: persona_mosaic-amazon_movie-1104-080347
+- id: q092
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.001
+  label: 'P1 yelp: top_k=4 with align 1e-3 (lower weight point at the new width)'
+  contribution:
+  - moe
+  - intent-conformity-in-personas
+  hypothesis: 'top_k=4 가중치 곡선: 2e-3 -0.7%, 3e-3(진행 중, val .1310 < 2e-3 .1326), 5e-3 -4.3%, 1e-2(진행 중, val .1226)
+    → 정점이 2e-3 이하에 있다. top_k=2에서는 1e-3(-1.8)과 2e-3(-1.6)이 평탄했지만 top_k=4에서는 가중치 민감도가 다르므로(5e-3이 -3.6점) 아래쪽 점이 필요하다.'
+  prediction: G1 -2.5% ~ +0.5% (현 2e-3 -0.7%).
+  decision_rule: 2e-3 대비 +1점 이상 → 5e-4 추가. 잡음 안 → 2e-3 유지(곡선 평탄 구간). 더 나쁨 → 2e-3이 정점으로 확정, yelp 가중치 축 종료.
+  ledger_id: persona_mosaic-yelp-1104-083230
+- id: q093
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.007
+    layer_num: 4
+  label: 'P1 movie: top_k=4 + 7e-3 with 4 propagation layers (movie block and MOSAIC use 3; 2 was -5.8%)'
+  contribution:
+  - moe
+  hypothesis: Movie 백본 깊이는 2(-5.8%, 5e-3 top_k=2)와 3만 시험했다. 2→3이 크게 좋아졌으므로 4가 더 좋을 수 있다(희소 Movie 유저에게 더 넓은 수용 영역).
+    반대로 조기 과적합이 더 빨라질 수 있다. Movie에서 남은 마지막 tier A 하이퍼파라미터 축.
+  prediction: G1 -3% ~ +1% (현 -0.1%).
+  decision_rule: 3 대비 +1점 이상 → 5층 추가. 잡음 안 → 3 유지. 더 나쁨 → 3 확정. 잡음 안이거나 더 나쁘면 Movie tier A 축 소진으로 기록하고 tier B(q076)만
+    남는다.
+  ledger_id: persona_mosaic-amazon_movie-1104-083235
+- id: q094
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.002
+    llm_align_temperature: 0.5
+  label: 'P1 yelp: top_k=4 + 2e-3 with a softer InfoNCE (temperature 0.5) at the new mixture width'
+  contribution:
+  - moe
+  - intent-conformity-in-personas
+  hypothesis: top_k=4에서 정렬 가중치 민감도가 바뀌었다(5e-3이 -4.3%; top_k=2에서는 5e-3≈2e-3). 온도는 InfoNCE의 날카로움(negative 가중)을 바꾸는
+    별도 축으로, Yelp에서는 top_k=2·5e-3에서 .5가 .2와 잡음 안(N@10 .0661 vs .0656)이었고 top_k=4에서는 시험한 적이 없다. 센 정렬이 손해인 새 폭에서는 더
+    부드러운 목표(.5)가 그래프 임베딩을 덜 왜곡하면서 prior를 유지할 수 있다. 데이터셋별 하이퍼파라미터.
+  prediction: G1 -2.5% ~ +0.5% (현 2e-3·온도 .2 -0.7%).
+  decision_rule: 온도 .2 대비 +1점 이상 → .3과 1.0 점 추가. 잡음 안 → .2 유지, yelp 온도 축 종료. 더 나쁨 → .2 확정.
+  ledger_id: persona_mosaic-yelp-1104-090859
+- id: q095
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.007
+    reg_weight: 3.0e-06
+  label: 'P1 movie: top_k=4 + 7e-3 with reg_weight 3e-6 (embedding L2 x3 against early overfitting; 1e-5 collapsed)'
+  contribution:
+  - moe
+  hypothesis: Movie는 best epoch ~96에서 조기 과적합(val/test 격차 큼). reg_weight(임베딩 L2)는 Movie에서 1e-5 한 점만 시험했고 그때는 옛 구조(facet
+    목표, 5e-3)에서 ep 3 이후 붕괴(-42%) — 10배는 과하다. 3배(3e-6)는 임베딩 norm 성장을 늦춰 과적합을 늦출 수 있다. keep_rate .8(무변화)과 달리 그래프가
+    아니라 파라미터를 직접 제약한다. 하이퍼파라미터.
+  prediction: G1 -3% ~ +1% (현 -0.1%), best epoch 100 이상.
+  decision_rule: 1e-6 대비 +1점 이상 → 5e-6 추가. 잡음 안 → 1e-6 유지. 더 나쁨(또는 조기 붕괴) → reg 축 종료. layer_num 4(q093)와 함께 잡음 안이면
+    Movie tier A 소진으로 기록하고 tier B만 남는다.
+  ledger_id: persona_mosaic-amazon_movie-1104-093037
+- id: q096
+  status: launched
+  tier: B
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mix
+    persona_align_weight: 0.002
+    top_k: 4
+  label: 'P1 all datasets: prior_composition=mix on yelp (q076 companion; same code change, same approval)'
+  contribution:
+  - experts-not-handcrafted
+  - moe
+  - intent-conformity-in-personas
+  hypothesis: q076과 같다 — expert k의 유저 입력 = unit(클러스터 k에 가장 가까운 facet + 전체 페르소나 평균). Yelp에서는 mean 목표(top_k=4, 2e-3)가
+    G1 -0.7%, facet 목표(옛 구조, 5e-3)가 MOSAIC 대비 -0.9%로 둘이 비슷했으므로 mix는 평균과 같거나 약간 다를 것이다. 공유 구조 채택 판정에는 세 데이터셋 결과가
+    필요하다.
+  prediction: G1 -3% ~ -0.5% (현 mean -0.7%).
+  decision_rule: q076의 규칙을 따른다 — Movie·Yelp 모두 현 mean 결과 이상(잡음 안 포함)이면 Book 1회(phase_lock 예외, 사용자 확인) 뒤 채택 판단. 한
+    곳이라도 잡음 밖으로 낮으면 mix 폐기.
+  approved: 사용자 2026-11-04 09:48 q076 승인("승인해")에 포함된 세-데이터셋 후보 실행. 패치 harness/patches/2026-11-04-q076-mix-composition.patch
+  needs: '코드: q076과 동일(이미 적용). 판별: (1) 분포 교사 아님 (2) 증강 그래프 없음 (3) 베이스라인 식 아님(정렬 목표 벡터 구성).'
+  ledger_id: persona_mosaic-yelp-1104-100101
+- id: q097
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: yelp
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mean
+    top_k: 4
+    persona_align_weight: 0.002
+    keep_rate: 0.8
+  label: 'P1 yelp: top_k=4 + 2e-3 with edge dropout keep_rate=0.8 (regularisation axis, untested on yelp)'
+  contribution:
+  - moe
+  hypothesis: Yelp는 reg·dropout 축을 한 번도 시험하지 않았다. Movie에서 keep_rate .8은 무변화(-0.6% vs -0.1%)였고 reg 3e-6은 붕괴였다. Yelp는
+    250 epoch까지 학습하고 조기 과적합이 없어 dropout 효과가 작을 가능성이 높지만, 전파 그래프를 매 epoch 바꾸면 prior 정렬과 그래프 신호의 균형이 달라질 수 있다. 소거
+    실험(축 폐쇄 목적). 하이퍼파라미터.
+  prediction: G1 -2.5% ~ +0.5% (현 2e-3 -0.7%).
+  decision_rule: 2e-3·keep_rate 1.0 대비 +1점 이상 → 0.6 추가. 잡음 안 → 1.0 유지, 두 데이터셋에서 dropout 축 종료. 더 나쁨 → 1.0 확정.
+  ledger_id: persona_mosaic-yelp-1104-103152
+- id: q098
+  status: launched
+  tier: A
+  model: persona_mosaic
+  dataset: amazon_movie
+  overrides:
+    gate_mode: residual
+    persona_file: persona_emb_one.pkl
+    prior_composition: mix
+    top_k: 4
+    persona_align_weight: 0.01
+  label: 'P1 movie: mix target with align 1e-2 (per-dataset re-tune of the structural candidate before judging it)'
+  contribution:
+  - experts-not-handcrafted
+  - intent-conformity-in-personas
+  hypothesis: 'mix + 7e-3(q076)은 mean + 7e-3보다 평균 -3.6점(R@5만 잡음 경계 밖)이고 swap 민감도가 오히려 낮아졌다(.982 vs .966) = 모델이 mix
+    목표를 덜 쓴다. 사용자 규칙상 구조 후보는 데이터셋별 가중치 재조정 뒤 판정한다. mean 곡선에서 1e-2는 -1.6%(5e-3은 -7.1%)로 위쪽이 완만하므로 재조정 점은 1e-2 한 점으로
+    한다. (구조 탐색: struct!= mean, 후보 아님.)'
+  prediction: G1 -4% ~ -1% (mix 7e-3 -3.7%); mean 7e-3(-0.1%)을 넘을 확률은 낮다.
+  decision_rule: mean 최고(-0.1%) 이상(잡음 안 포함) → Movie에서 mix 유지 가능, Yelp 결과와 함께 Book 예외를 사용자에게 요청. 7e-3 mix와 잡음 안 또는
+    더 나쁨 → Movie에서 mix 폐기(재조정 끝), Yelp 결과와 무관하게 공유 구조는 mean 유지.
+  ledger_id: persona_mosaic-amazon_movie-1104-110056

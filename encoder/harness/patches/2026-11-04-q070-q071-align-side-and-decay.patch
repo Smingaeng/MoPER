@@ -1,0 +1,74 @@
+--- /tmp/claude-1005/-home-kyung-mosaic-v2/a5fc201c-2e10-46ef-bfaf-1874b282a4de/scratchpad/q070_backup/persona_mosaic.py	2026-11-03 22:00:39.516135534 +0900
++++ models/general_cf/persona_mosaic.py	2026-11-03 22:00:39.536135829 +0900
+@@ -95,7 +95,8 @@
+ ITEM_TEXTS = ("profile", "persona", "audience")  # audience: item = unit mean of its TRAINING users' persona means (q057, 2026-11-03)
+ CLUSTER_CACHE_TEMPLATE = "persona/persona_clusters_{spec}.pkl"
+ PRIOR_COMPOSITIONS = ("product", "persona", "cluster", "mean")  # mean: user = unit mean of ALL its personas (q039, 2026-11-03)
+-ALIGN_TARGETS = ("learned", "fixed")  # fixed: PCA-to-d projection of the persona text, stop-gradient (q040, 2026-11-03)
++ALIGN_TARGETS = ("learned", "fixed")
++ALIGN_SIDES = ("both", "user", "item")  # which side(s) the persona alignment loss is applied to (q070, 2026-11-04)  # fixed: PCA-to-d projection of the persona text, stop-gradient (q040, 2026-11-03)
+ PRIOR_SPACES = ("raw", "pca")
+ PRIOR_INJECTIONS = ("modulate", "additive", "both")
+ GATE_MODES = ("learned", "cluster", "residual")  # how x^k_v enters ExpertGCN (see LightGCNExpert)
+@@ -1529,6 +1530,12 @@
+         self.persona_align_target = str(self._hp("persona_align_target", "learned")).lower()
+         if self.persona_align_target not in ALIGN_TARGETS:
+             raise ValueError(f"persona_align_target must be one of {ALIGN_TARGETS}, got {self.persona_align_target!r}.")
++        self.persona_align_side = str(self._hp("persona_align_side", "both")).lower()
++        if self.persona_align_side not in ALIGN_SIDES:
++            raise ValueError(f"persona_align_side must be one of {ALIGN_SIDES}, got {self.persona_align_side!r}.")
++        # persona_align_decay_epochs > 0: the alignment weight decays linearly from its base value to 0 over that many
++        # epochs (strong early regulariser, free late training; q071, 2026-11-04).  Driven by trainer.set_epoch().
++        self.persona_align_decay_epochs = int(self._hp("persona_align_decay_epochs", 0))
+ 
+         self.register_buffer("cluster_centroids", t.from_numpy(bundle.centroids.astype(np.float32)), persistent=False)
+         self._store_static_feature("user_persona_table", bundle.user_table)
+@@ -1643,9 +1650,14 @@
+     # ------------------------------------------------------------------ config / logging helpers
+ 
+     def set_epoch(self, epoch_idx: int) -> None:
+-        """Called by the trainer before every epoch; drives the gate warm-up (uniform routing)."""
++        """Called by the trainer before every epoch; drives the gate warm-up (uniform routing) and the alignment decay."""
+         self._epoch = int(epoch_idx)
+         self.gate.force_uniform = self._epoch < self.gate_warmup_epochs
++        if self.persona_align_decay_epochs > 0:
++            base = getattr(self, "_persona_align_base_weight", None)
++            if base is None:
++                base = self._persona_align_base_weight = float(self.persona_align_weight)
++            self.persona_align_weight = base * max(0.0, 1.0 - self._epoch / float(self.persona_align_decay_epochs))
+ 
+     def _hp(self, key: str, default):
+         """Dataset block first (also where --override lands), then the model block, then the default."""
+@@ -1685,6 +1697,8 @@
+             )
+             + f"prior={self.prior_composition} "
+             + (f"[align target fixed pca{self.embedding_size}, {self.align_fix_variance:.1%} var] " if self.persona_align_target == "fixed" else "")
++            + (f"[align side {self.persona_align_side}] " if self.persona_align_side != "both" else "")
++            + (f"[align weight decays to 0 over {self.persona_align_decay_epochs} epochs] " if self.persona_align_decay_epochs > 0 else "")
+             + f"on {prior_space}; clustering {clustering_space}; gate input={self.gate_input_dim} (topology 4"
+             f"{' + cluster sim ' + str(self.expert_num) if self.gate_persona_similarity else ''}); "
+             f"top_k={self.top_k}; gate mode={self.gate_mode}"
+@@ -2143,10 +2157,10 @@
+             uses_item = bool((w_pos[:, expert_idx] > 0).any()) or bool((w_neg[:, expert_idx] > 0).any())
+             if not uses_user and not uses_item:
+                 continue
+-            if uses_user:
++            if uses_user and self.persona_align_side != "item":
+                 user_prior = self._align_target_table("user", expert_idx, device=device, prior_cache=prior_cache)
+                 loss = loss + _weighted_infonce(final_user_embeds, ancs, user_prior, w_anc[:, expert_idx], temp)
+-            if uses_item:
++            if uses_item and self.persona_align_side != "user":
+                 item_prior = self._align_target_table("item", expert_idx, device=device, prior_cache=prior_cache)
+                 loss = loss + _weighted_infonce(final_pos_item_embeds, poss, item_prior, w_pos[:, expert_idx], temp)
+                 loss = loss + _weighted_infonce(final_neg_item_embeds, negs, item_prior, w_neg[:, expert_idx], temp)
+--- /tmp/claude-1005/-home-kyung-mosaic-v2/a5fc201c-2e10-46ef-bfaf-1874b282a4de/scratchpad/q070_backup/persona_mosaic.yml	2026-11-03 22:00:39.516135534 +0900
++++ config/modelconf/persona_mosaic.yml	2026-11-03 22:00:39.536135829 +0900
+@@ -77,6 +77,8 @@
+   # ---- priors and routing ----
+   prior_composition: product       # expert-k input per node: product = persona (.) centroid_k | persona (closest facet only; Book best)
+                                    # | cluster (centroid only) | mean (user: unit mean of ALL its personas; item: its text) (q039, 2026-11-03)
++  persona_align_side: both         # both | user (drop the item-side alignment term) | item (q070, 2026-11-04)
++  persona_align_decay_epochs: 0    # >0: persona_align_weight decays linearly to 0 over this many epochs (q071, 2026-11-04); 0 = constant
+   persona_align_target: learned    # learned: align to MLP^k(x) (MOSAIC) | fixed: align to a constant PCA-to-d projection of the same
+                                    # persona text rows, stop-gradient (q040, 2026-11-03); the InfoNCE and gate weighting are unchanged
+   gate_persona_similarity: true    # gate input = 4 topology features (+ K cosine similarities to the clusters)

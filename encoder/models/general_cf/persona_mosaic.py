@@ -16,7 +16,8 @@ ExpertGCN = prior-modulated LightGCN expert, and the loss terms are identical):
                   One ExpertGCN per cluster.
 * Prior         - expert k receives, for node v, the persona of v that is closest to cluster k composed
                   with the cluster centroid (``prior_composition``: persona (.) centroid, persona only,
-                  or centroid only) and projects it with its own MLP^k.  An item's single text vector is its
+                  centroid only, ``mean`` = unit mean of all the user's personas for every expert, or ``mix`` =
+                  unit(closest persona + mean)) and projects it with its own MLP^k.  An item's single text vector is its
                   closest persona for every cluster.  ``profile``: centred by the profile mean and mapped into
                   the clustering / prior spaces of the user personas.  ``persona``: centred, projected and
                   normalised exactly like the user personas; items whose persona generation failed (``valid``
@@ -27,6 +28,26 @@ ExpertGCN = prior-modulated LightGCN expert, and the loss terms are identical):
                   cluster similarities (``text_dim``, CLI ``--d_text``).  The default is the raw text embedding
                   dimension (4096; ``text_dim: 0`` or ``text_dim: 4096`` = no PCA).  A smaller value, e.g. 32,
                   maps the embeddings into d_text dimensions with a PCA fitted on the user persona pool.
+* Injection     - ``prior_injection``: ``modulate`` (MOSAIC: layer-wise multiplicative gate 1 + lambda tanh(MLP(x^k_v))
+                  on the free node embeddings; the 2026-10-29 Book diagnosis showed it degenerates to a node-
+                  independent mask, so the prior is ignored), ``additive`` (E^(0)_v = E_free,v + prior_add_scale
+                  * x^k_v, no modulation: the persona decides where the node starts in the embedding space and
+                  the shared MLP^k lets similar personas share updates) or ``both``.  ``prior_add_free_embeds:
+                  false`` drops E_free so E^(0) is the projected persona alone (strongest, cold-start friendly).
+* Text score    - ``text_score: true`` adds a separate persona-content term to every score:
+                  y_ui = e_u . e_i + beta * sum_k w^k_u w^k_i cos(x^k_u, x^k_i), with x^k_v the expert-k persona
+                  projection (MLP^k) and w the gate weights, so the content enters the score without touching the
+                  node embeddings (the additive injection let MLP^k displace E_free).  beta is a learnable scalar
+                  (``text_score_beta_init``, ``text_score_beta_learnable``); ``text_score_norm: false`` uses raw
+                  dot products instead of cosines.  The run log reports beta and the text/graph score ratio.
+* Gate routing  - ``gate_mode``: ``learned`` (MOSAIC: logits = MLP(topology + cluster similarities); on Book
+                  it collapses to one expert within ~30 epochs under balance weight 1e-3, 2026-10-29/30),
+                  ``cluster`` (logits = gate_cluster_scale * z-scored cosine similarity of the node's personas to
+                  each cluster: fixed persona routing, nothing learned, expert k serves the nodes that belong to
+                  cluster k) or ``residual`` (learned logits + the scaled similarities).  ``gate_warmup_epochs``
+                  routes every node uniformly (1/K) for the first epochs so all experts are trained before the
+                  gate can prefer one (the collapse is rich-get-richer from an asymmetric start).  The balance
+                  loss (``balance_loss_weight``, K * sum_k importance_k * load_k, in [1, K]) stays as in MOSAIC.
 * Control       - ``persona_shuffle`` (global / within_cluster) and ``item_shuffle`` permute which node owns which
                   text vector (facets stay together); the clustering is unchanged.  Trained from scratch, they
                   measure how much of the accuracy comes from the persona *content* (see _shuffle_user_owners).
@@ -69,12 +90,18 @@ init = nn.init.xavier_uniform_
 PriorCache = Dict[Tuple[str, int, str], t.Tensor]
 
 PERSONA_FILE = "persona/persona_emb.pkl"
+DEFAULT_PERSONA_FILE = "persona_emb.pkl"  # ``persona_file`` selects another pickle in data/<dataset>/persona/ (same schema)
 ITEM_PROFILE_FILE = "itm_emb_np.pkl"  # RLMRec item profile embeddings (configs['itmprf_embeds'])
 ITEM_PERSONA_FILE = "persona/item_persona_emb.pkl"  # one LLM persona per item: {'emb', 'valid', 'view_names'}
-ITEM_TEXTS = ("profile", "persona")
+ITEM_TEXTS = ("profile", "persona", "audience")  # audience: item = unit mean of its TRAINING users' persona means (q057, 2026-11-03)
 CLUSTER_CACHE_TEMPLATE = "persona/persona_clusters_{spec}.pkl"
-PRIOR_COMPOSITIONS = ("product", "persona", "cluster")
+PRIOR_COMPOSITIONS = ("product", "persona", "cluster", "mean", "mix")  # mean: user = unit mean of ALL its personas (q039, 2026-11-03)
+# mix: user row for expert k = unit(facet closest to cluster k + unit mean of all its personas); items unchanged (q076, 2026-11-04)
+ALIGN_TARGETS = ("learned", "fixed")
+ALIGN_SIDES = ("both", "user", "item")  # which side(s) the persona alignment loss is applied to (q070, 2026-11-04)  # fixed: PCA-to-d projection of the persona text, stop-gradient (q040, 2026-11-03)
 PRIOR_SPACES = ("raw", "pca")
+PRIOR_INJECTIONS = ("modulate", "additive", "both")
+GATE_MODES = ("learned", "cluster", "residual")  # how x^k_v enters ExpertGCN (see LightGCNExpert)
 PERSONA_SHUFFLES = ("none", "global", "within_cluster")  # control experiment: who owns which persona set
 
 
@@ -868,19 +895,27 @@ def _build_persona_bundle(
     user_num: int,
     item_num: int,
     params: Dict,
+    trn_mat=None,
 ) -> SimpleNamespace:
-    """Load the user personas and the item text (RLMRec profile or item persona), cluster the user personas
-    into experts and derive the per-node persona tables and cluster similarities."""
+    """Load the user personas and the item text (RLMRec profile, item persona, or the audience persona built from
+    the training interactions), cluster the user personas into experts and derive the per-node persona tables
+    and cluster similarities."""
     memo_key = f"{data_dir.resolve()}|{sorted(params.items())}"
     if memo_key in _BUNDLE_MEMO:
         return _BUNDLE_MEMO[memo_key]
 
-    persona_path = data_dir / PERSONA_FILE
+    persona_file = str(params.get("persona_file") or DEFAULT_PERSONA_FILE)
+    persona_path = data_dir / "persona" / persona_file
     if not persona_path.exists():
         raise FileNotFoundError(
             f"Missing LLM persona embeddings for {dataset}: {persona_path}. "
-            "PersonaMosaic needs persona/persona_emb.pkl from the persona generation step."
+            "PersonaMosaic needs persona/persona_emb.pkl from the persona generation step (or set persona_file)."
         )
+    # a non-default persona file gets its own clustering cache: persona_emb_one.pkl -> persona_clusters_one_<spec>.pkl
+    cache_prefix = ""
+    if persona_file != DEFAULT_PERSONA_FILE:
+        stem = persona_file[:-4] if persona_file.endswith(".pkl") else persona_file
+        cache_prefix = (stem[len("persona_emb_"):] if stem.startswith("persona_emb_") else stem) + "_"
     users, _, meta = _parse_persona_pickle(persona_path)  # item persona records, if any, are not used
     if users is None:
         raise ValueError(f"No user persona records ('u<uid>:p<j>') found in {persona_path}.")
@@ -895,6 +930,10 @@ def _build_persona_bundle(
         raise ValueError(f"item_text must be one of {ITEM_TEXTS}, got {item_text!r}.")
     if item_text == "persona":
         item_emb, item_valid, item_text_path = _load_item_personas(data_dir, item_num, raw_dim)
+    elif item_text == "audience":
+        if trn_mat is None:
+            raise ValueError("item_text=audience needs the training interaction matrix (trn_mat).")
+        item_text_path = "audience: mean persona of each item's training users (trn_mat)"
     else:
         profiles = _load_item_profiles(data_dir, item_num, raw_dim)
         item_text_path = data_dir / ITEM_PROFILE_FILE
@@ -904,12 +943,13 @@ def _build_persona_bundle(
     item_shuffle = bool(params.get("item_shuffle", False))
     shuffle_seed = int(params.get("shuffle_seed", params["seed"]))
     shuffle_notes = []
+    item_perm = None
     if item_shuffle:
         # Control experiment: item i receives the text vector of a random other item (trained from scratch).
         item_perm = np.random.default_rng(shuffle_seed + 1).permutation(item_num)
         if item_text == "persona":
             item_emb, item_valid = item_emb[item_perm], item_valid[item_perm]
-        else:
+        elif item_text == "profile":
             profiles = profiles[item_perm]
         shuffle_notes.append(f"item text shuffled across items (seed {shuffle_seed + 1})")
     text_dim = int(params["text_dim"])
@@ -938,7 +978,7 @@ def _build_persona_bundle(
         "records": int(users.num_records),
         "dim": int(raw_dim),
     }
-    cache_path = data_dir / CLUSTER_CACHE_TEMPLATE.format(spec=_cluster_spec(clustering_params))
+    cache_path = data_dir / CLUSTER_CACHE_TEMPLATE.format(spec=cache_prefix + _cluster_spec(clustering_params))
     # The clustering step also fits the text reducer (centring + PCA to text_dim) on the user persona pool; the
     # projection is cached next to the centroids so that every process maps personas into the same space.
     clusters = _cluster_personas(
@@ -997,6 +1037,11 @@ def _build_persona_bundle(
     user_index, user_sim, user_missing = _best_persona_per_cluster(
         np.vstack([user_pool, cluster_fallback]), user_slots, clustering_centroids
     )
+    # prior_composition=mean: one prior-space row per user = unit-normalised mean of all its personas (zero: none)
+    user_mean_table = np.zeros((user_num, dim), dtype=np.float32)
+    np.add.at(user_mean_table, user_owner, user_prior_pool.astype(np.float32))
+    user_mean_table /= np.maximum(np.bincount(user_owner, minlength=user_num), 1).astype(np.float32)[:, None]
+    user_mean_table = _l2_normalize_np(user_mean_table)
 
     if item_text == "persona":
         # Items: one persona per item (no facets), so it is the item's closest persona for every cluster.  It is in
@@ -1005,6 +1050,29 @@ def _build_persona_bundle(
         # an invalid persona get the zero fallback row, like users without personas.
         item_pool = reducer.transform(item_emb)  # clustering space: similarity to every cluster
         item_table = np.vstack([to_prior(item_emb), fallback])
+        item_slots = np.where(item_valid, np.arange(item_num, dtype=np.int64), -1)[:, None]
+        item_index, item_sim, item_missing = _best_persona_per_cluster(
+            np.vstack([item_pool, cluster_fallback]), item_slots, clustering_centroids
+        )
+    elif item_text == "audience":
+        # Items: the audience persona = unit mean, over the item's TRAINING users, of each user's unit mean persona
+        # (clustering space for the cluster similarities, prior space for the expert inputs / alignment target).
+        # Items without training users get the zero fallback row.  Test / validation interactions are never used.
+        A = _as_csr_binary(trn_mat)
+        if A.shape != (user_num, item_num):
+            raise ValueError(f"trn_mat shape {A.shape} does not match ({user_num}, {item_num}).")
+        user_mean_clust = np.zeros((user_num, clustering_dim), dtype=np.float32)
+        np.add.at(user_mean_clust, user_owner, np.asarray(user_pool, dtype=np.float32))
+        user_mean_clust /= np.maximum(np.bincount(user_owner, minlength=user_num), 1).astype(np.float32)[:, None]
+        user_mean_clust = _l2_normalize_np(user_mean_clust)
+        counts = np.asarray(A.sum(axis=0)).ravel().astype(np.float32)
+        item_valid = counts > 0
+        denom = np.maximum(counts, 1.0)[:, None]
+        item_pool = _l2_normalize_np(np.asarray(A.T @ user_mean_clust, dtype=np.float32) / denom)
+        item_prior_rows = _l2_normalize_np(np.asarray(A.T @ user_mean_table, dtype=np.float32) / denom)
+        if item_perm is not None:
+            item_pool, item_prior_rows, item_valid = item_pool[item_perm], item_prior_rows[item_perm], item_valid[item_perm]
+        item_table = np.vstack([item_prior_rows, fallback])
         item_slots = np.where(item_valid, np.arange(item_num, dtype=np.int64), -1)[:, None]
         item_index, item_sim, item_missing = _best_persona_per_cluster(
             np.vstack([item_pool, cluster_fallback]), item_slots, clustering_centroids
@@ -1037,6 +1105,7 @@ def _build_persona_bundle(
         labels=labels,
         clusters=clusters,
         user_table=user_table,
+        user_mean_table=user_mean_table,
         user_index=user_index,
         user_sim=user_sim,
         user_missing=user_missing,
@@ -1144,26 +1213,63 @@ class LayerWisePriorModulator(nn.Module):
 
 
 class SharedSoftmaxTopKGate(nn.Module):
-    """One shared softmax router used by both user and item nodes."""
+    """One shared softmax router used by both user and item nodes.
 
-    def __init__(self, input_dim: int, hidden_dim: int, expert_num: int):
+    ``mode``: ``learned`` (MOSAIC, logits = MLP(features)), ``cluster`` (logits = cluster_scale * the last
+    ``cluster_dim`` feature columns = z-scored cluster similarities; no parameters) or ``residual`` (both).
+    ``force_uniform`` (gate warm-up) replaces the routing weights by 1/K for every node; probabilities and the
+    balance loss are still computed from the logits.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        expert_num: int,
+        mode: str = "learned",
+        cluster_scale: float = 1.0,
+        cluster_dim: int = 0,
+    ):
         super().__init__()
         self.expert_num = int(expert_num)
-        self.gate = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, expert_num),
+        self.mode = str(mode)
+        self.cluster_scale = float(cluster_scale)
+        self.cluster_dim = int(cluster_dim)
+        self.force_uniform = False
+        if self.mode not in GATE_MODES:
+            raise ValueError(f"gate mode must be one of {GATE_MODES}, got {self.mode!r}.")
+        if self.mode != "learned" and self.cluster_dim != self.expert_num:
+            raise ValueError("cluster / residual gate modes need one cluster-similarity feature per expert.")
+        self.gate = (
+            None
+            if self.mode == "cluster"
+            else nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, expert_num),
+            )
         )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        if self.gate is None:
+            return
         for module in self.gate:
             if isinstance(module, nn.Linear):
                 init(module.weight)
                 nn.init.zeros_(module.bias)
 
+    def logits(self, features: t.Tensor) -> t.Tensor:
+        features = features.float()
+        if self.mode == "learned":
+            return self.gate(features)
+        sims = self.cluster_scale * features[:, -self.cluster_dim :]
+        if self.mode == "cluster":
+            return sims
+        return self.gate(features) + sims
+
     def forward(self, features: t.Tensor, topk: int) -> Tuple[t.Tensor, t.Tensor, t.Tensor, t.Tensor]:
-        logits = self.gate(features.float())
+        logits = self.logits(features)
         probs = F.softmax(logits, dim=-1)
 
         topk = max(1, min(int(topk), self.expert_num))
@@ -1177,6 +1283,8 @@ class SharedSoftmaxTopKGate(nn.Module):
         importance = probs.mean(dim=0)
         load = sparse_weights.mean(dim=0) if topk == self.expert_num else selected.mean(dim=0)
         balance_loss = self.expert_num * t.sum(importance * load)
+        if self.force_uniform:
+            sparse_weights = t.full_like(probs, 1.0 / self.expert_num)
         return sparse_weights, top_idx, probs, balance_loss
 
 
@@ -1201,12 +1309,24 @@ class LightGCNExpert(nn.Module):
         modulation_scale: float,
         modulation_lambda_init: float,
         modulation_init_std: float,
+        prior_injection: str = "modulate",
+        prior_add_scale: float = 1.0,
+        prior_add_free_embeds: bool = True,
+        prior_add_norm: bool = False,
     ):
         super().__init__()
         self.user_num = int(user_num)
         self.item_num = int(item_num)
         self.embedding_size = int(embedding_size)
         self.layer_num = int(layer_num)
+        self.prior_injection = str(prior_injection).lower()
+        if self.prior_injection not in PRIOR_INJECTIONS:
+            raise ValueError(f"prior_injection must be one of {PRIOR_INJECTIONS}, got {prior_injection!r}.")
+        self.prior_add_scale = float(prior_add_scale)
+        self.prior_add_free_embeds = bool(prior_add_free_embeds)
+        self.prior_add_norm = bool(prior_add_norm)
+        if self.prior_injection == "modulate" and not self.prior_add_free_embeds:
+            raise ValueError("prior_add_free_embeds=false needs prior_injection additive or both.")
         self.user_embeds = nn.Parameter(init(t.empty(self.user_num, self.embedding_size)))
         self.item_embeds = nn.Parameter(init(t.empty(self.item_num, self.embedding_size)))
         self.layer_modulators = nn.ModuleList(
@@ -1263,16 +1383,28 @@ class LightGCNExpert(nn.Module):
 
         all_embeds = t.cat([user_embeds, item_embeds], dim=0)
         all_priors = t.cat([user_prior, item_prior], dim=0)
+        if self.prior_injection != "modulate":
+            # Additive injection: the projected persona prior x^k_v is (part of) the expert's E^(0).  With
+            # prior_add_norm the rows are unit-normalised first, so MLP^k only chooses a direction and cannot
+            # outgrow E_free (Book 2026-10-30: unnormalised |x| reached 9-20 vs |E_free| 0.3 and the model
+            # degenerated into MLP(persona) that stopped generalising at epoch ~50).
+            prior_rows = F.normalize(all_priors, dim=1) if self.prior_add_norm else all_priors
+            prior_term = self.prior_add_scale * prior_rows
+            all_embeds = all_embeds + prior_term if self.prior_add_free_embeds else prior_term
+        modulate = self.prior_injection != "additive"
         readout_terms = []
         prop_adj = self.edge_dropper(adj, keep_rate) if self.training else adj
         if prop_adj.device != embed_device:
             prop_adj = prop_adj.to(device=embed_device)
 
         for layer_idx in range(self.layer_num + 1):
-            gate = self.layer_modulators[layer_idx](all_priors)
-            if gate.shape != all_embeds.shape:
-                raise ValueError(f"Layer-wise gate shape {gate.shape} must match embeddings {all_embeds.shape}.")
-            modulated_embeds = gate * all_embeds
+            if modulate:
+                gate = self.layer_modulators[layer_idx](all_priors)
+                if gate.shape != all_embeds.shape:
+                    raise ValueError(f"Layer-wise gate shape {gate.shape} must match embeddings {all_embeds.shape}.")
+                modulated_embeds = gate * all_embeds
+            else:
+                modulated_embeds = all_embeds
             readout_terms.append(modulated_embeds)
             if layer_idx < self.layer_num:
                 all_embeds = t.spmm(prop_adj, modulated_embeds)
@@ -1357,6 +1489,7 @@ class PersonaMosaic(BaseModel):
             "prior_space": str(self._hp("prior_space", "raw")).lower(),
             "item_text": str(self._hp("item_text", "profile")).lower(),  # profile: RLMRec item profile | persona: item persona
             # control experiments (see _shuffle_user_owners): none | global | within_cluster; item_shuffle: bool
+            "persona_file": str(self._hp("persona_file", DEFAULT_PERSONA_FILE)),
             "persona_shuffle": str(self._hp("persona_shuffle", "none")).lower(),
             "item_shuffle": bool(self._hp("item_shuffle", False)),
             "shuffle_seed": int(self._hp("shuffle_seed", self._hp("clustering_seed", configs["train"].get("seed", 2025)))),
@@ -1377,6 +1510,7 @@ class PersonaMosaic(BaseModel):
             self.user_num,
             self.item_num,
             persona_params,
+            trn_mat=trn_mat,
         )
         self.persona_params = persona_params
         self.expert_num = int(bundle.K)
@@ -1395,9 +1529,19 @@ class PersonaMosaic(BaseModel):
             raise ValueError(f"prior_composition must be one of {PRIOR_COMPOSITIONS}, got {self.prior_composition!r}.")
         # persona (.) centroid of unit vectors has norm ~ 1/sqrt(dim); rescale to unit order like the other inputs.
         self._product_scale = math.sqrt(float(self.persona_dim))
+        self.persona_align_target = str(self._hp("persona_align_target", "learned")).lower()
+        if self.persona_align_target not in ALIGN_TARGETS:
+            raise ValueError(f"persona_align_target must be one of {ALIGN_TARGETS}, got {self.persona_align_target!r}.")
+        self.persona_align_side = str(self._hp("persona_align_side", "both")).lower()
+        if self.persona_align_side not in ALIGN_SIDES:
+            raise ValueError(f"persona_align_side must be one of {ALIGN_SIDES}, got {self.persona_align_side!r}.")
+        # persona_align_decay_epochs > 0: the alignment weight decays linearly from its base value to 0 over that many
+        # epochs (strong early regulariser, free late training; q071, 2026-11-04).  Driven by trainer.set_epoch().
+        self.persona_align_decay_epochs = int(self._hp("persona_align_decay_epochs", 0))
 
         self.register_buffer("cluster_centroids", t.from_numpy(bundle.centroids.astype(np.float32)), persistent=False)
         self._store_static_feature("user_persona_table", bundle.user_table)
+        self._store_static_feature("user_persona_mean", bundle.user_mean_table)
         self.register_buffer("user_persona_index", t.from_numpy(bundle.user_index.astype(np.int64)), persistent=False)
         self.register_buffer("user_cluster_sim", t.from_numpy(bundle.user_sim.astype(np.float32)), persistent=False)
         self.register_buffer("item_cluster_sim", t.from_numpy(bundle.item_sim.astype(np.float32)), persistent=False)
@@ -1416,11 +1560,23 @@ class PersonaMosaic(BaseModel):
         self.register_buffer("item_gate_features", t.from_numpy(item_gate_features), persistent=False)
 
         gate_hidden = int(self._hp("gate_hidden_size", 64))
+        self.gate_mode = str(self._hp("gate_mode", "learned")).lower()
+        if self.gate_mode not in GATE_MODES:
+            raise ValueError(f"PersonaMosaic gate_mode must be one of {GATE_MODES}, got {self.gate_mode!r}.")
+        if self.gate_mode != "learned" and not self.gate_persona_similarity:
+            raise ValueError(f"gate_mode={self.gate_mode} needs gate_persona_similarity: true.")
+        self.gate_cluster_scale = float(self._hp("gate_cluster_scale", 1.0))
+        self.gate_warmup_epochs = int(self._hp("gate_warmup_epochs", 0))
         self.gate = SharedSoftmaxTopKGate(
             input_dim=self.gate_input_dim,
             hidden_dim=gate_hidden,
             expert_num=self.expert_num,
+            mode=self.gate_mode,
+            cluster_scale=self.gate_cluster_scale,
+            cluster_dim=self.expert_num if self.gate_persona_similarity else 0,
         )
+        self._epoch = 0  # the trainer's set_epoch() drives the warm-up; a model rebuilt for the final test
+        self.gate.force_uniform = False  # (trainer rebuilds + load_state_dict) must route with the trained gate
 
         # ----- Phase 2: K ExpertGCNs with persona-prior diversifiers -----
         prior_hidden = self._hp("prior_hidden_size", None)
@@ -1429,6 +1585,15 @@ class PersonaMosaic(BaseModel):
             [PriorProjector(self.persona_dim, self.embedding_size, prior_hidden) for _ in range(self.expert_num)]
         )
 
+        if self.persona_align_target == "fixed":
+            # alignment target = (x - mean) @ P with P the leading d principal components of the user persona pool
+            # (prior space); a constant projection, so the alignment pulls towards the external text geometry
+            # instead of a target produced by the trained MLP^k (which co-moves with the graph embedding).
+            pool = bundle.user_table[:-1]
+            fix_reducer, fix_var = _fit_text_reducer(pool, self.embedding_size, True, _clustering_device(self.persona_params["device"]))
+            self.register_buffer("align_fix_mean", t.from_numpy(fix_reducer.mean.astype(np.float32)), persistent=False)
+            self.register_buffer("align_fix_comp", t.from_numpy(fix_reducer.components.astype(np.float32)), persistent=False)
+            self.align_fix_variance = float(fix_var)
         modulation_hidden = 4 * self.embedding_size
         modulation_dropout = 0.0
         self.layer_modulation_scale = float(self._hp("layer_modulation_scale", 0.5))
@@ -1436,6 +1601,12 @@ class PersonaMosaic(BaseModel):
             self._hp("layer_modulation_lambda_init", min(self.layer_modulation_scale, 1.0e-2))
         )
         modulation_init_std = float(self._hp("layer_modulation_init_std", 1.0e-3))
+        self.prior_injection = str(self._hp("prior_injection", "modulate")).lower()
+        if self.prior_injection not in PRIOR_INJECTIONS:
+            raise ValueError(f"prior_injection must be one of {PRIOR_INJECTIONS}, got {self.prior_injection!r}.")
+        self.prior_add_scale = float(self._hp("prior_add_scale", 1.0))
+        self.prior_add_free_embeds = bool(self._hp("prior_add_free_embeds", True))
+        self.prior_add_norm = bool(self._hp("prior_add_norm", False))
         self.lightgcn_experts = nn.ModuleList(
             [
                 LightGCNExpert(
@@ -1448,6 +1619,10 @@ class PersonaMosaic(BaseModel):
                     self.layer_modulation_scale,
                     modulation_lambda_init,
                     modulation_init_std,
+                    prior_injection=self.prior_injection,
+                    prior_add_scale=self.prior_add_scale,
+                    prior_add_free_embeds=self.prior_add_free_embeds,
+                    prior_add_norm=self.prior_add_norm,
                 )
                 for _ in range(self.expert_num)
             ]
@@ -1457,11 +1632,34 @@ class PersonaMosaic(BaseModel):
         self.llm_align_temperature = float(self._hp("llm_align_temperature", 0.2))
         self.persona_align_weight = float(self._hp("persona_align_weight", 0.0))
 
+        # ----- separate persona-content score term (see module docstring, "Text score") -----
+        self.text_score = bool(self._hp("text_score", False))
+        self.text_score_norm = bool(self._hp("text_score_norm", True))
+        if self.text_score:
+            self.text_score_beta = nn.Parameter(
+                t.tensor(float(self._hp("text_score_beta_init", 1.0)), dtype=t.float32),
+                requires_grad=bool(self._hp("text_score_beta_learnable", True)),
+            )
+        else:
+            self.text_score_beta = None
+
         self._cached_e_user = None
         self._cached_e_item = None
+        self._cached_t_user = None
+        self._cached_t_item = None
         self._log_summary(bundle)
 
     # ------------------------------------------------------------------ config / logging helpers
+
+    def set_epoch(self, epoch_idx: int) -> None:
+        """Called by the trainer before every epoch; drives the gate warm-up (uniform routing) and the alignment decay."""
+        self._epoch = int(epoch_idx)
+        self.gate.force_uniform = self._epoch < self.gate_warmup_epochs
+        if self.persona_align_decay_epochs > 0:
+            base = getattr(self, "_persona_align_base_weight", None)
+            if base is None:
+                base = self._persona_align_base_weight = float(self.persona_align_weight)
+            self.persona_align_weight = base * max(0.0, 1.0 - self._epoch / float(self.persona_align_decay_epochs))
 
     def _hp(self, key: str, default):
         """Dataset block first (also where --override lands), then the model block, then the default."""
@@ -1486,17 +1684,42 @@ class PersonaMosaic(BaseModel):
                 f"over K={self.persona_params['k_min']}..{self.persona_params['k_max']}"
             )
         summary = (
-            f"{selection}; sizes={clusters.get('sizes')}; user personas={bundle.user_records} "
+            f"{selection}; sizes={clusters.get('sizes')}; user personas={bundle.user_records}"
+            + (f" from {self.persona_params['persona_file']}" if self.persona_params.get("persona_file", DEFAULT_PERSONA_FILE) != DEFAULT_PERSONA_FILE else "")
+            + " "
             f"(users without persona={int(bundle.user_missing.sum())}); "
             + (
                 f"item personas={self.item_num} (items without persona={int(bundle.item_missing.sum())}); "
                 if bundle.item_text == "persona"
-                else f"items=RLMRec profile {ITEM_PROFILE_FILE}; "
+                else (
+                    f"items=audience persona (mean of training users' persona means; items without users={int(bundle.item_missing.sum())}); "
+                    if bundle.item_text == "audience"
+                    else f"items=RLMRec profile {ITEM_PROFILE_FILE}; "
+                )
             )
             + f"prior={self.prior_composition} "
-            f"on {prior_space}; clustering {clustering_space}; gate input={self.gate_input_dim} (topology 4"
+            + (f"[align target fixed pca{self.embedding_size}, {self.align_fix_variance:.1%} var] " if self.persona_align_target == "fixed" else "")
+            + (f"[align side {self.persona_align_side}] " if self.persona_align_side != "both" else "")
+            + (f"[align weight decays to 0 over {self.persona_align_decay_epochs} epochs] " if self.persona_align_decay_epochs > 0 else "")
+            + f"on {prior_space}; clustering {clustering_space}; gate input={self.gate_input_dim} (topology 4"
             f"{' + cluster sim ' + str(self.expert_num) if self.gate_persona_similarity else ''}); "
-            f"top_k={self.top_k}; cache={bundle.cache_path}"
+            f"top_k={self.top_k}; gate mode={self.gate_mode}"
+            + (f" (cluster scale {self.gate_cluster_scale:g})" if self.gate_mode != "learned" else "")
+            + f", warm-up epochs={self.gate_warmup_epochs}, balance weight={self.balance_loss_weight:g}"
+            f"; prior injection={self.prior_injection}"
+            + (
+                f" (scale {self.prior_add_scale}, free embeds {self.prior_add_free_embeds}, unit-norm {self.prior_add_norm})"
+                if self.prior_injection != "modulate"
+                else ""
+            )
+            + (
+                f"; text score beta init={float(self.text_score_beta):.3g} "
+                f"({'learnable' if self.text_score_beta.requires_grad else 'fixed'}, "
+                f"{'cosine' if self.text_score_norm else 'dot'})"
+                if self.text_score
+                else ""
+            )
+            + f"; cache={bundle.cache_path}"
             + (f"; CONTROL: {bundle.shuffle_note}" if bundle.shuffle_note else "")
         )
         configs["model"]["persona_clusters"] = summary  # picked up by Logger's 'Model|' line
@@ -1549,7 +1772,7 @@ class PersonaMosaic(BaseModel):
         return rows
 
     def _compose_prior_input(self, persona_rows: t.Tensor, expert_idx: int) -> t.Tensor:
-        if self.prior_composition == "persona":
+        if self.prior_composition in ("persona", "mean", "mix"):
             return persona_rows
         centroid = self._centroid(expert_idx, persona_rows.device).unsqueeze(0)
         if self.prior_composition == "cluster":
@@ -1577,12 +1800,52 @@ class PersonaMosaic(BaseModel):
             raise ValueError(f"Unknown node_type: {node_type}")
 
         with t.no_grad():
-            rows = self._persona_rows(node_type, expert_idx, device)
+            rows = self._node_text_rows(node_type, expert_idx, device)
             prior_input = self._compose_prior_input(rows, expert_idx)
         prior = self.prior_projectors[expert_idx](prior_input)
         if prior_cache is not None:
             prior_cache[cache_key] = prior
         return prior
+
+    def _node_text_rows(self, node_type: str, expert_idx: int, device: t.device) -> t.Tensor:
+        """Prior-space text rows feeding expert ``expert_idx``: a user's persona closest to the cluster, with
+        prior_composition=mean the unit mean of all its personas, or with prior_composition=mix the unit-normalised
+        sum of both (facet_k + mean: expert-specific input that keeps the mean's stability; users without personas
+        stay zero); an item's single text vector."""
+        if node_type == "user":
+            if self.prior_composition == "mean":
+                return self._feature_table("user_persona_mean", device)
+            if self.prior_composition == "mix":
+                facet = self._persona_rows(node_type, expert_idx, device)
+                mean = self._feature_table("user_persona_mean", device)
+                if mean.device != facet.device:
+                    mean = mean.to(device=facet.device, non_blocking=True)
+                return F.normalize(facet + mean, dim=1, eps=1e-8)
+        return self._persona_rows(node_type, expert_idx, device)
+
+    def _align_target_table(
+        self,
+        node_type: str,
+        expert_idx: int,
+        device: t.device,
+        prior_cache: PriorCache | None = None,
+    ) -> t.Tensor:
+        """Alignment target per node for expert ``expert_idx``: the learned prior x^k_v (MOSAIC) or, with
+        persona_align_target=fixed, the constant PCA projection of the same text rows (no gradient)."""
+        if self.persona_align_target != "fixed":
+            return self._raw_node_prior_table(node_type, expert_idx, device=device, prior_cache=prior_cache)
+        cache_key = ("align_fixed", node_type, int(expert_idx), str(device))
+        if prior_cache is not None and cache_key in prior_cache:
+            return prior_cache[cache_key]
+        with t.no_grad():
+            rows = self._node_text_rows(node_type, expert_idx, device)
+            x = self._compose_prior_input(rows, expert_idx)
+            mean = self.align_fix_mean.to(device=x.device)
+            comp = self.align_fix_comp.to(device=x.device)
+            target = (x - mean) @ comp
+        if prior_cache is not None:
+            prior_cache[cache_key] = target
+        return target
 
     def _gate_features(self, node_type: str, device: t.device | None = None) -> t.Tensor:
         if node_type not in {"user", "item"}:
@@ -1648,6 +1911,38 @@ class PersonaMosaic(BaseModel):
     def _clear_embedding_cache(self) -> None:
         self._cached_e_user = None
         self._cached_e_item = None
+        self._cached_t_user = None
+        self._cached_t_item = None
+
+    # ------------------------------------------------------------------ persona-content score term
+
+    def _text_parts(
+        self,
+        w_user: t.Tensor,
+        w_item: t.Tensor,
+        device: t.device,
+        prior_cache: PriorCache | None = None,
+    ) -> Tuple[Optional[t.Tensor], Optional[t.Tensor]]:
+        """[nodes, K*d] gate-weighted (unit-normalised) expert persona projections T_v = ||_k w^k_v x^k_v, so that
+        T_u . T_i = sum_k w^k_u w^k_i x^k_u . x^k_i is the persona-content score (None when text_score is off)."""
+        if not self.text_score:
+            return None, None
+        parts = {"user": [], "item": []}
+        for node, w in (("user", w_user), ("item", w_item)):
+            if w.device != device:
+                w = w.to(device=device, non_blocking=True)
+            for k in self.all_expert_ids:
+                x = self._raw_node_prior_table(node, k, device=device, prior_cache=prior_cache)
+                if self.text_score_norm:
+                    x = F.normalize(x, dim=1)
+                parts[node].append(w[:, k : k + 1] * x)
+        return t.cat(parts["user"], dim=1), t.cat(parts["item"], dim=1)
+
+    def _text_pair_scores(self, t_user: Optional[t.Tensor], t_item: Optional[t.Tensor]) -> Optional[t.Tensor]:
+        """beta * (T_u . T_i) for aligned rows, or None when text_score is off."""
+        if t_user is None or t_item is None:
+            return None
+        return self.text_score_beta * (t_user * t_item).sum(dim=-1)
 
     def _compute_all_embeddings(self, keep_rate: float, prior_cache: PriorCache | None = None):
         if self.training:
@@ -1661,9 +1956,10 @@ class PersonaMosaic(BaseModel):
         w_item, _, _, b_item = self.gate(self._gate_features("item", device), self.top_k)
         final_user = self._route_expert_outputs(user_outputs, w_user, self.all_expert_ids)
         final_item = self._route_expert_outputs(item_outputs, w_item, self.all_expert_ids)
+        t_user, t_item = self._text_parts(w_user, w_item, device, prior_cache=prior_cache)
 
         balance = 0.5 * (b_user + b_item)
-        return final_user, final_item, balance
+        return final_user, final_item, balance, t_user, t_item
 
     def _compute_training_batch_embeddings(
         self,
@@ -1702,6 +1998,11 @@ class PersonaMosaic(BaseModel):
         )
 
         balance = 0.5 * (b_user + b_item)
+        t_user, t_item = self._text_parts(w_user, w_item, device, prior_cache=prior_cache)
+        text_pos = text_neg = None
+        if t_user is not None:
+            text_pos = self._text_pair_scores(t_user.index_select(0, ancs), t_item.index_select(0, poss))
+            text_neg = self._text_pair_scores(t_user.index_select(0, ancs), t_item.index_select(0, negs))
         return (
             final_users.index_select(0, user_inverse),
             final_items.index_select(0, pos_inverse),
@@ -1709,17 +2010,36 @@ class PersonaMosaic(BaseModel):
             balance,
             w_user,
             w_item,
+            text_pos,
+            text_neg,
         )
 
     def _get_final_embeddings(self, keep_rate: float) -> Tuple[t.Tensor, t.Tensor]:
+        user_embeds, item_embeds, _, _ = self._get_final_embeddings_and_text(keep_rate)
+        return user_embeds, item_embeds
+
+    def _get_final_embeddings_and_text(self, keep_rate: float):
+        """(e_user, e_item, T_user, T_item); the T parts are None when text_score is off."""
         if self.training:
-            user_embeds, item_embeds, _ = self._compute_all_embeddings(keep_rate)
-            return user_embeds, item_embeds
+            user_embeds, item_embeds, _, t_user, t_item = self._compute_all_embeddings(keep_rate)
+            return user_embeds, item_embeds, t_user, t_item
         if self._cached_e_user is None or self._cached_e_item is None:
-            user_embeds, item_embeds, _ = self._compute_all_embeddings(keep_rate)
+            user_embeds, item_embeds, _, t_user, t_item = self._compute_all_embeddings(keep_rate)
             self._cached_e_user = user_embeds
             self._cached_e_item = item_embeds
-        return self._cached_e_user, self._cached_e_item
+            self._cached_t_user = t_user
+            self._cached_t_item = t_item
+        return self._cached_e_user, self._cached_e_item, self._cached_t_user, self._cached_t_item
+
+    def _score_matrix(self, user_ids: t.Tensor, keep_rate: float = 1.0) -> t.Tensor:
+        """[len(user_ids), items] full scores e_u . e_i (+ beta T_u . T_i when text_score is on)."""
+        user_all, item_embeds, t_user, t_item = self._get_final_embeddings_and_text(keep_rate)
+        if user_ids.device != user_all.device:
+            user_ids = user_ids.to(device=user_all.device, non_blocking=True)
+        scores = user_all.index_select(0, user_ids) @ item_embeds.T
+        if t_user is not None:
+            scores = scores + self.text_score_beta * (t_user.index_select(0, user_ids) @ t_item.T)
+        return scores
 
     def _score_pairs(
         self,
@@ -1728,9 +2048,9 @@ class PersonaMosaic(BaseModel):
         return_balance: bool = False,
     ):
         if return_balance:
-            all_user_embeds, all_item_embeds, balance = self._compute_all_embeddings(self.keep_rate)
+            all_user_embeds, all_item_embeds, balance, t_user, t_item = self._compute_all_embeddings(self.keep_rate)
         else:
-            all_user_embeds, all_item_embeds = self._get_final_embeddings(self.keep_rate)
+            all_user_embeds, all_item_embeds, t_user, t_item = self._get_final_embeddings_and_text(self.keep_rate)
             balance = None
         users = users.long()
         items = items.long()
@@ -1741,6 +2061,8 @@ class PersonaMosaic(BaseModel):
         user_embeds = all_user_embeds.index_select(0, users)
         item_embeds = all_item_embeds.index_select(0, items)
         scores = (user_embeds * item_embeds).sum(dim=-1)
+        if t_user is not None:
+            scores = scores + self._text_pair_scores(t_user.index_select(0, users), t_item.index_select(0, items))
 
         if return_balance:
             return scores, balance
@@ -1773,6 +2095,8 @@ class PersonaMosaic(BaseModel):
             balance,
             w_user,
             w_item,
+            text_pos,
+            text_neg,
         ) = self._compute_training_batch_embeddings(
             self.keep_rate,
             ancs,
@@ -1782,6 +2106,9 @@ class PersonaMosaic(BaseModel):
         )
         pos_scores = (user_embeds * pos_item_embeds).sum(dim=-1)
         neg_scores = (user_embeds * neg_item_embeds).sum(dim=-1)
+        if text_pos is not None:
+            pos_scores = pos_scores + text_pos
+            neg_scores = neg_scores + text_neg
 
         bpr_loss = F.softplus(neg_scores - pos_scores).sum() / ancs.shape[0]
         reg_loss = self.reg_weight * reg_params(self)
@@ -1841,14 +2168,125 @@ class PersonaMosaic(BaseModel):
             uses_item = bool((w_pos[:, expert_idx] > 0).any()) or bool((w_neg[:, expert_idx] > 0).any())
             if not uses_user and not uses_item:
                 continue
-            if uses_user:
-                user_prior = self._raw_node_prior_table("user", expert_idx, device=device, prior_cache=prior_cache)
+            if uses_user and self.persona_align_side != "item":
+                user_prior = self._align_target_table("user", expert_idx, device=device, prior_cache=prior_cache)
                 loss = loss + _weighted_infonce(final_user_embeds, ancs, user_prior, w_anc[:, expert_idx], temp)
-            if uses_item:
-                item_prior = self._raw_node_prior_table("item", expert_idx, device=device, prior_cache=prior_cache)
+            if uses_item and self.persona_align_side != "user":
+                item_prior = self._align_target_table("item", expert_idx, device=device, prior_cache=prior_cache)
                 loss = loss + _weighted_infonce(final_pos_item_embeds, poss, item_prior, w_pos[:, expert_idx], temp)
                 loss = loss + _weighted_infonce(final_neg_item_embeds, negs, item_prior, w_neg[:, expert_idx], temp)
         return self.persona_align_weight * loss / batch_size
+
+    # ------------------------------------------------------------------ diagnostics (written to the run log)
+
+    @t.no_grad()
+    def diagnostics(self, brief: bool = False) -> list:
+        """Lines for the run log that say whether the personas are actually used (trainer logs them: a brief gate
+        line periodically, the full set on the best model at the end).
+
+        * gate: mean probability and top-1 share per expert, normalised entropy, and how much the probabilities move
+          when the cluster-similarity or the topology features are zeroed (0 = the gate ignores them; a top-1 share
+          of 1.0 for one expert = collapsed gate).
+        * expert: |E_free| vs |prior| row norms, layer read-out alpha, and for the multiplicative modulation the
+          lambda, mean |gate - 1| and the std of the modulation over nodes (0 = node-independent mask = prior ignored).
+        * persona swap: with the trained model fixed, give every user (item) the personas of a random other user
+          (item), both in the prior path and in the gate's similarity features; top-20 overlap with the original
+          lists and the embedding cosine (1.0 = the output does not depend on the personas).
+        """
+        was_training = self.training
+        self.eval()
+        dev = self._embedding_device()
+        K = self.expert_num
+        lines = []
+        fmt = lambda xs: "[" + ", ".join(f"{float(x):.3f}" for x in xs) + "]"
+        try:
+            for node in ("user", "item"):
+                feats = self._gate_features(node, dev)
+                _, _, probs, balance = self.gate(feats, self.top_k)
+                top1 = probs.argmax(dim=1)
+                share = [(top1 == k).float().mean() for k in range(K)]
+                entropy = float(-(probs * (probs + 1e-12).log()).sum(1).mean() / math.log(K)) if K > 1 else 0.0
+                sens = ""
+                if self.gate_persona_similarity and feats.shape[1] > 4 and self.gate_mode != "cluster":
+                    f_nosim = feats.clone(); f_nosim[:, 4:] = 0
+                    f_notop = feats.clone(); f_notop[:, :4] = 0
+                    d_sim = float((self.gate(f_nosim, self.top_k)[2] - probs).abs().sum(1).mean() / 2)
+                    d_top = float((self.gate(f_notop, self.top_k)[2] - probs).abs().sum(1).mean() / 2)
+                    sens = f"; TV-dist when zeroing cluster-sim={d_sim:.4f}, topology={d_top:.4f}"
+                warm = " (warm-up: routing forced uniform)" if self.gate.force_uniform else ""
+                lines.append(
+                    f"[diag] gate {node} [{self.gate_mode}]{warm}: mean prob={fmt(probs.mean(0))}; "
+                    f"top-1 share={fmt(share)}; norm. entropy={entropy:.3f}; balance={float(balance):.3f}{sens}"
+                )
+            if self.text_score:
+                self._clear_embedding_cache()
+                e_u, e_i, t_u, t_i = self._get_final_embeddings_and_text(1.0)
+                gen_t = t.Generator(device="cpu").manual_seed(1)
+                su = t.randint(0, self.user_num, (4096,), generator=gen_t).to(dev)
+                si = t.randint(0, self.item_num, (4096,), generator=gen_t).to(dev)
+                graph = (e_u[su] * e_i[si]).sum(1)
+                text = self._text_pair_scores(t_u[su], t_i[si])
+                lines.append(
+                    f"[diag] text score: beta={float(self.text_score_beta):.4f}; mean|beta*T_u.T_i|="
+                    f"{float(text.abs().mean()):.4f} vs mean|e_u.e_i|={float(graph.abs().mean()):.4f} "
+                    f"(random pairs); corr(text, graph)={float(t.corrcoef(t.stack([text, graph]))[0, 1]):.3f}"
+                )
+            if brief:
+                return lines
+            for k, expert in enumerate(self.lightgcn_experts):
+                up = self._raw_node_prior_table("user", k, device=dev)
+                ip = self._raw_node_prior_table("item", k, device=dev)
+                alpha = F.softmax(self.layer_logits[k].reshape(-1), dim=0)
+                line = (
+                    f"[diag] expert {k}: injection={expert.prior_injection}; |E_free| user row-norm="
+                    f"{float(expert.user_embeds.norm(dim=1).mean()):.4f}, |prior| user row-norm={float(up.norm(dim=1).mean()):.4f}"
+                    f" (item {float(expert.item_embeds.norm(dim=1).mean()):.4f} / {float(ip.norm(dim=1).mean()):.4f}); "
+                    f"layer alpha={fmt(alpha)}"
+                )
+                if expert.prior_injection != "modulate" and expert.prior_add_norm:
+                    line += f"; added prior row-norm={expert.prior_add_scale:.3f} (unit-norm x scale)"
+                if expert.prior_injection != "additive":
+                    pri = t.cat([up, ip], 0)
+                    lams, mags, stds = [], [], []
+                    for mod in expert.layer_modulators:
+                        g = mod(pri) - 1.0
+                        lams.append(mod.modulation_lambda()); mags.append(g.abs().mean()); stds.append(g.std(0).mean())
+                    line += (f"; modulation lambda={fmt(lams)}, mean|gate-1|={fmt(mags)}, "
+                             f"std over nodes={fmt(stds)}")
+                lines.append(line)
+            # persona swap at inference
+            self._clear_embedding_cache()
+            u1, i1 = self._get_final_embeddings(1.0)
+            gen = t.Generator(device="cpu").manual_seed(0)
+            sample = t.randperm(self.user_num, generator=gen)[: min(2000, self.user_num)].to(dev)
+            base_top = self._score_matrix(sample).topk(20, dim=1).indices
+            for node, num in (("user", self.user_num), ("item", self.item_num)):
+                idx_name, feat_name = f"{node}_persona_index", f"{node}_gate_features"
+                idx0 = getattr(self, idx_name); feat0 = getattr(self, feat_name)
+                perm = t.randperm(num, generator=gen).to(idx0.device)
+                setattr(self, idx_name, idx0[perm])
+                mean0 = None
+                if node == "user" and self.prior_composition in ("mean", "mix"):
+                    mean0 = self.user_persona_mean
+                    setattr(self, "user_persona_mean", mean0[perm.to(mean0.device)])
+                if self.gate_persona_similarity and feat0.shape[1] > 4:
+                    feat1 = feat0.clone(); feat1[:, 4:] = feat0[perm.to(feat0.device), 4:]
+                    setattr(self, feat_name, feat1)
+                self._clear_embedding_cache()
+                u2, i2 = self._get_final_embeddings(1.0)
+                top2 = self._score_matrix(sample).topk(20, dim=1).indices
+                overlap = float((base_top.unsqueeze(2) == top2.unsqueeze(1)).any(2).float().mean())
+                cos = float(F.cosine_similarity(u1 if node == "user" else i1, u2 if node == "user" else i2, dim=1).mean())
+                lines.append(f"[diag] persona swap ({node}s, inference only): top-20 overlap={overlap:.3f}, "
+                             f"{node} embedding cos={cos:.4f}")
+                setattr(self, idx_name, idx0); setattr(self, feat_name, feat0)
+                if mean0 is not None:
+                    setattr(self, "user_persona_mean", mean0)
+            self._clear_embedding_cache()
+        finally:
+            if was_training:
+                self.train()
+        return lines
 
     # ------------------------------------------------------------------ inference
 
@@ -1856,11 +2294,7 @@ class PersonaMosaic(BaseModel):
     def full_predict(self, batch_data):
         pck_users, train_mask = batch_data
         pck_users = pck_users.long()
-        user_all, item_embeds = self._get_final_embeddings(1.0)
-        if pck_users.device != user_all.device:
-            pck_users = pck_users.to(device=user_all.device, non_blocking=True)
-        user_embeds = user_all.index_select(0, pck_users)
-        full_preds = user_embeds @ item_embeds.T
+        full_preds = self._score_matrix(pck_users, 1.0)
         if train_mask.device != full_preds.device:
             train_mask = train_mask.to(device=full_preds.device, non_blocking=True)
         return self._mask_predict(full_preds, train_mask)

@@ -115,6 +115,8 @@ class Trainer(object):
         for epoch_idx in range(train_config['epoch']):
             # train
             start_time = time.time()
+            if hasattr(model, "set_epoch"):
+                model.set_epoch(epoch_idx)  # persona_mosaic: gate warm-up schedule
             if configs['model']['type'] == 'discriminative':
                 ep_loss = self.train_epoch_dis(model, epoch_idx)
             else:
@@ -124,6 +126,8 @@ class Trainer(object):
             # evaluate
             if epoch_idx % train_config['test_step'] == 0:
                 eval_result = self.evaluate(model, epoch_idx)
+                if epoch_idx % (train_config['test_step'] * 10) == 0:
+                    self.log_diagnostics(model, brief=True)
                 # test_result = self.test(model)
                 if eval_result['recall'][-1] > best_recall:
                     now_patience = 0
@@ -147,6 +151,7 @@ class Trainer(object):
         model = build_model(self.data_handler).to(configs['device'])
         model.load_state_dict(best_state_dict)
         test_result = self.test(model)
+        self.log_diagnostics(model)  # best-epoch model: gate / prior usage (models that define diagnostics())
 
         self.save_model(model)  # best-epoch parameters, if train.save_model
 
@@ -157,6 +162,16 @@ class Trainer(object):
         with open(test_file, 'a') as f:
             tag = configs['train'].get('tag', '')
             f.write("{}Best Epoch {}. Final test result: {}. \n".format('[{}] '.format(tag) if tag else '', best_epoch, test_result))
+
+    def log_diagnostics(self, model, brief=False):
+        diagnostics = getattr(model, 'diagnostics', None)
+        if diagnostics is None:
+            return
+        try:
+            for line in diagnostics(brief=brief):
+                self.logger.log(line)
+        except Exception as exc:  # never let a diagnostic kill a run
+            self.logger.log('[diag] failed: {!r}'.format(exc))
 
     @log_exceptions
     def evaluate(self, model, epoch_idx=None):

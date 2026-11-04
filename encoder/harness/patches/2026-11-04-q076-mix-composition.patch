@@ -1,0 +1,74 @@
+--- a/encoder/models/general_cf/persona_mosaic.py	2026-11-04 09:49:45.493674146 +0900
++++ b/encoder/models/general_cf/persona_mosaic.py	2026-11-04 09:49:45.465673705 +0900
+@@ -16,7 +16,8 @@
+                   One ExpertGCN per cluster.
+ * Prior         - expert k receives, for node v, the persona of v that is closest to cluster k composed
+                   with the cluster centroid (``prior_composition``: persona (.) centroid, persona only,
+-                  or centroid only) and projects it with its own MLP^k.  An item's single text vector is its
++                  centroid only, ``mean`` = unit mean of all the user's personas for every expert, or ``mix`` =
++                  unit(closest persona + mean)) and projects it with its own MLP^k.  An item's single text vector is its
+                   closest persona for every cluster.  ``profile``: centred by the profile mean and mapped into
+                   the clustering / prior spaces of the user personas.  ``persona``: centred, projected and
+                   normalised exactly like the user personas; items whose persona generation failed (``valid``
+@@ -94,7 +95,8 @@
+ ITEM_PERSONA_FILE = "persona/item_persona_emb.pkl"  # one LLM persona per item: {'emb', 'valid', 'view_names'}
+ ITEM_TEXTS = ("profile", "persona", "audience")  # audience: item = unit mean of its TRAINING users' persona means (q057, 2026-11-03)
+ CLUSTER_CACHE_TEMPLATE = "persona/persona_clusters_{spec}.pkl"
+-PRIOR_COMPOSITIONS = ("product", "persona", "cluster", "mean")  # mean: user = unit mean of ALL its personas (q039, 2026-11-03)
++PRIOR_COMPOSITIONS = ("product", "persona", "cluster", "mean", "mix")  # mean: user = unit mean of ALL its personas (q039, 2026-11-03)
++# mix: user row for expert k = unit(facet closest to cluster k + unit mean of all its personas); items unchanged (q076, 2026-11-04)
+ ALIGN_TARGETS = ("learned", "fixed")
+ ALIGN_SIDES = ("both", "user", "item")  # which side(s) the persona alignment loss is applied to (q070, 2026-11-04)  # fixed: PCA-to-d projection of the persona text, stop-gradient (q040, 2026-11-03)
+ PRIOR_SPACES = ("raw", "pca")
+@@ -1770,7 +1772,7 @@
+         return rows
+ 
+     def _compose_prior_input(self, persona_rows: t.Tensor, expert_idx: int) -> t.Tensor:
+-        if self.prior_composition in ("persona", "mean"):
++        if self.prior_composition in ("persona", "mean", "mix"):
+             return persona_rows
+         centroid = self._centroid(expert_idx, persona_rows.device).unsqueeze(0)
+         if self.prior_composition == "cluster":
+@@ -1806,10 +1808,19 @@
+         return prior
+ 
+     def _node_text_rows(self, node_type: str, expert_idx: int, device: t.device) -> t.Tensor:
+-        """Prior-space text rows feeding expert ``expert_idx``: a user's persona closest to the cluster, or with
+-        prior_composition=mean the unit mean of all its personas; an item's single text vector."""
+-        if self.prior_composition == "mean" and node_type == "user":
+-            return self._feature_table("user_persona_mean", device)
++        """Prior-space text rows feeding expert ``expert_idx``: a user's persona closest to the cluster, with
++        prior_composition=mean the unit mean of all its personas, or with prior_composition=mix the unit-normalised
++        sum of both (facet_k + mean: expert-specific input that keeps the mean's stability; users without personas
++        stay zero); an item's single text vector."""
++        if node_type == "user":
++            if self.prior_composition == "mean":
++                return self._feature_table("user_persona_mean", device)
++            if self.prior_composition == "mix":
++                facet = self._persona_rows(node_type, expert_idx, device)
++                mean = self._feature_table("user_persona_mean", device)
++                if mean.device != facet.device:
++                    mean = mean.to(device=facet.device, non_blocking=True)
++                return F.normalize(facet + mean, dim=1, eps=1e-8)
+         return self._persona_rows(node_type, expert_idx, device)
+ 
+     def _align_target_table(
+@@ -2255,7 +2266,7 @@
+                 perm = t.randperm(num, generator=gen).to(idx0.device)
+                 setattr(self, idx_name, idx0[perm])
+                 mean0 = None
+-                if node == "user" and self.prior_composition == "mean":
++                if node == "user" and self.prior_composition in ("mean", "mix"):
+                     mean0 = self.user_persona_mean
+                     setattr(self, "user_persona_mean", mean0[perm.to(mean0.device)])
+                 if self.gate_persona_similarity and feat0.shape[1] > 4:
+--- a/encoder/config/modelconf/persona_mosaic.yml	2026-11-04 09:49:45.493674146 +0900
++++ b/encoder/config/modelconf/persona_mosaic.yml	2026-11-04 09:49:45.469673768 +0900
+@@ -77,6 +77,7 @@
+   # ---- priors and routing ----
+   prior_composition: product       # expert-k input per node: product = persona (.) centroid_k | persona (closest facet only; Book best)
+                                    # | cluster (centroid only) | mean (user: unit mean of ALL its personas; item: its text) (q039, 2026-11-03)
++                                   # | mix (user: unit(closest facet_k + mean of all its personas); item: its text) (q076, 2026-11-04)
+   persona_align_side: both         # both | user (drop the item-side alignment term) | item (q070, 2026-11-04)
+   persona_align_decay_epochs: 0    # >0: persona_align_weight decays linearly to 0 over this many epochs (q071, 2026-11-04); 0 = constant
+   persona_align_target: learned    # learned: align to MLP^k(x) (MOSAIC) | fixed: align to a constant PCA-to-d projection of the same

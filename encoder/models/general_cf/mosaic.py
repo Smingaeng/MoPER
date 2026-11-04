@@ -539,6 +539,32 @@ class Mosaic(BaseModel):
         usrconf = _to_numpy_float_array(configs.get("usrconf_embeds"), "usrconf_embeds")
         itmconf = _to_numpy_float_array(configs.get("itmconf_embeds"), "itmconf_embeds")
         comm_conformity = _to_numpy_float_array(configs.get("commconf_embeds"), "commconf_embeds")
+        # ---- ablation of the LLM priors (default real = unchanged MOSAIC) ----
+        # none: every LLM table (user/item intent & conformity, community intent & conformity) is zeroed, so each
+        #       projector emits a constant prior and the model is 4 routed LightGCNs; the intent alignment loss is
+        #       disabled (constant priors make it degenerate).
+        # shuffle: rows permuted among users and among items (one permutation per node type, seed llm_prior_seed),
+        #       so every node keeps a real but wrong description; community tables untouched.
+        self.llm_prior = str(self.hyper_config.get("llm_prior", configs["model"].get("llm_prior", "real"))).lower()
+        if self.llm_prior not in {"real", "none", "shuffle"}:
+            raise ValueError("Mosaic llm_prior must be real, none or shuffle.")
+        if self.llm_prior == "none":
+            usrint, itmint, usrconf, itmconf = (np.zeros_like(x) for x in (usrint, itmint, usrconf, itmconf))
+            comm_intent, comm_conformity = np.zeros_like(comm_intent), np.zeros_like(comm_conformity)
+            configs["model"]["llm_prior_note"] = "ABLATION: llm_prior=none (all LLM tables zeroed; intent align off)"
+        elif self.llm_prior == "shuffle":
+            seed = int(self.hyper_config.get("llm_prior_seed", configs["model"].get("llm_prior_seed", 2025)))
+            rng = np.random.default_rng(seed)
+            user_perm, item_perm = rng.permutation(usrint.shape[0]), rng.permutation(itmint.shape[0])
+            usrint, usrconf = usrint[user_perm], usrconf[user_perm]
+            itmint, itmconf = itmint[item_perm], itmconf[item_perm]
+            configs["model"]["llm_prior_note"] = (
+                f"CONTROL: llm_prior=shuffle (user and item intent/conformity rows permuted, seed {seed}; "
+                f"{int((user_perm != np.arange(len(user_perm))).sum())} users, "
+                f"{int((item_perm != np.arange(len(item_perm))).sum())} items moved)"
+            )
+        if "llm_prior_note" in configs["model"]:
+            print(f"[mosaic] {self.dataset}: {configs['model']['llm_prior_note']}")
         if usrint.shape[0] != self.user_num or itmint.shape[0] != self.item_num:
             raise ValueError(
                 f"Intent embedding shape mismatch: user/item={(usrint.shape[0], itmint.shape[0])}, "
@@ -653,6 +679,8 @@ class Mosaic(BaseModel):
                 configs["model"].get("intent_align_weight", 0.0),
             )
         )
+        if self.llm_prior == "none":
+            self.intent_align_weight = 0.0
 
         self._cached_e_user = None
         self._cached_e_item = None
