@@ -4,7 +4,7 @@
 #   REPO_DIR  repo root (default: two levels above this script)
 #   --smoke   also run the 3-minute amazon_book smoke of HANDOFF.md §4 and check its log
 # Steps: conda (miniconda if absent) -> env "mosaic" python 3.10.22 -> pip -r requirements-min.txt (torch 2.8.0 cu128)
-#        -> run.py shebang + CLAUDE.md / SKILL.md paths -> Claude Code memory + model settings -> harness status/goals
+#        -> harness/.python (interpreter) + CLAUDE.md / SKILL.md paths -> Claude Code memory + model settings -> harness status/goals
 #        -> Claude Code CLI (~/.local/bin/claude; SKIP_CLI=1 to skip) -> optional smoke.
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -54,12 +54,12 @@ for i in range(torch.cuda.device_count()):
 PYEOF
 
 log "2. machine-specific paths"
-sed -i "1s|^#!.*|#!$PY|" "$REPO/encoder/harness/run.py"
+printf '%s\n' "$PY" > "$REPO/encoder/harness/.python"      # run.py re-execs itself with this interpreter (git-ignored)
 chmod +x "$REPO/encoder/harness/run.py"
 for f in "$REPO/.claude/skills/harness-tick/SKILL.md" "$REPO/encoder/harness/CLAUDE.md"; do
   if [ -f "$f" ]; then sed -i "s|/home/kyung/mosaic_v2|$REPO|g" "$f"; fi
 done
-echo "run.py shebang: $(head -1 "$REPO/encoder/harness/run.py")"
+echo "harness/.python -> $(cat "$REPO/encoder/harness/.python")"
 
 log "3. Claude Code memory + settings"
 SLUG=$(printf '%s' "$REPO" | sed 's#[^A-Za-z0-9]#-#g')     # /home/work/mosaic_v2 -> -home-work-mosaic-v2

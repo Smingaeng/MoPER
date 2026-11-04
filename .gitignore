@@ -3,3 +3,4 @@ encoder/save/
 __pycache__/
 encoder/harness/runs/
 encoder/harness/state.json
+encoder/harness/.python

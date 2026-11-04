@@ -4,8 +4,8 @@ description: One tick of the PERSONA-MOSAIC experiment harness (encoder/harness)
 ---
 
 Work from the repo's `encoder/` directory (e.g. /home/kyung/mosaic_v2/encoder on the old server, /home/work/minkyung/mosaic_v2/encoder on the Backend.AI container). Read harness/CLAUDE.md first; its rules override everything below.
-`R=harness/run.py` (runs with the mosaic conda python via its shebang).
-If that shebang path does not exist on this machine (after a server move), use `R="python harness/run.py"` with the
+`R=harness/run.py` (re-execs itself with the interpreter named in harness/.python, the mosaic conda env).
+If harness/.python is missing on this machine (after a server move), write the env python path into it (remote_setup.sh does) or use `R="python harness/run.py"` from the activated env with the
 `mosaic` conda env activated, and read harness/HANDOFF.md once before the first tick.
 
 1. `$R collect` — finalises harness runs that ended, imports logs started outside the harness.

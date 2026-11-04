@@ -1,4 +1,4 @@
-#!/home/kyung/miniconda3/envs/mosaic/bin/python
+#!/usr/bin/env python3
 """PERSONA-MOSAIC experiment harness.
 
 One entry point for launching runs, turning their logs into ledger records, and reporting against the
@@ -14,6 +14,15 @@ project goals.  Read harness/CLAUDE.md for the rules; this file only enforces th
 Ledger ids look like persona_mosaic-amazon_book-1030-031033 (model-dataset-MMDD-HHMMSS, launch or log time).
 """
 from __future__ import annotations
+
+# Interpreter bootstrap: harness/.python (git-ignored, one line, written by remote_setup.sh or by hand) names the project
+# python (conda env "mosaic"). If we are not running under it, re-exec, so `harness/run.py ...` works from any shell.
+import os as _os, sys as _sys
+_pyfile = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".python")
+if _os.path.exists(_pyfile):
+    _py = open(_pyfile).read().strip()
+    if _py and _os.path.exists(_py) and _os.path.realpath(_sys.executable) != _os.path.realpath(_py):
+        _os.execv(_py, [_py] + _sys.argv)
 
 import argparse
 import ast

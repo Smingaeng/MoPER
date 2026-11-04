@@ -3,11 +3,11 @@
 이 디렉터리(encoder/harness)의 작업과 `/harness-tick`에서는 이 문서가 최우선이다. 기계적으로 검사되는 부분은
 `constraints.yaml`(run.py가 실행 전에 강제), 실행·기록은 `run.py`, 실험 대기열은 `queue.yaml`, 모든 결과는
 `ledger.jsonl`, 결정의 역사는 `JOURNAL.md`, 분석 양식은 `ANALYSIS_TEMPLATE.md`. 기준값은 `references.yaml`.
-실행 명령은 항상 리포의 `encoder/`에서 `harness/run.py ...` (shebang이 mosaic conda python을 쓴다).
+실행 명령은 항상 리포의 `encoder/`에서 `harness/run.py ...` (`harness/.python`에 적힌 mosaic conda python으로 자기 자신을 다시 실행한다).
 
 ## 0. 우선순위 — 현재 단계 (사용자, 2026-11-03 23:50 갱신)
 - **2026-11-04 11:22 실험 종료(서버 이전).** 실행 0개, cron 중지. 새 서버에서 재개하려면 먼저 `harness/HANDOFF.md`를 따른다
-  (링크 실체화, run.py shebang, `gpu_min_free_mib`, smoke 확인, 중단된 q092/q094/q096/q097/q098 재실행 여부).
+  (링크 실체화, harness/.python, `gpu_min_free_mib`, smoke 확인, 중단된 q092/q094/q096/q097/q098 재실행 여부).
 - **방법론은 Book·Movie·Yelp에서 동일해야 한다.** 구조 노브(gate 종류, 페르소나 파일, 정렬 목표 구성, 아이템 텍스트, prior 주입,
   K 규칙, top_k 등)는 `constraints.yaml`의 `shared_structure` 값으로 고정이고, 데이터셋별로 달라도 되는 것은 하이퍼파라미터
   (정렬 가중치, 온도, balance, layer_num, reg 등)뿐이다. `shared_structure`에서 벗어난 실행은 '탐색'(report에 `struct!=`)이며

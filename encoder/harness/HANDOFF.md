@@ -26,7 +26,7 @@ rsync -aL --info=progress2 --exclude 'data/steam' kyung@168.188.128.124:/home/ky
 MINICONDA_DIR=$D/miniconda3 bash $D/mosaic_v2/encoder/harness/remote_setup.sh $D/mosaic_v2 --smoke
 ```
 `remote_setup.sh`: miniconda(없을 때만, `MINICONDA_DIR`) → env `mosaic` python 3.10.22 → `pip -r requirements-min.txt`(torch 2.8.0 cu128) →
-`run.py` shebang·`CLAUDE.md`·`SKILL.md`의 `/home/kyung/mosaic_v2` 치환 → Claude Code 메모리를 `~/.claude/projects/<slug>/memory/`에 복사
+`harness/.python`·`CLAUDE.md`·`SKILL.md`의 `/home/kyung/mosaic_v2` 치환 → Claude Code 메모리를 `~/.claude/projects/<slug>/memory/`에 복사
 (slug = 리포 절대경로의 영숫자 외 문자를 `-`로: `/home/work/mosaic/mosaic_v2` → `-home-work-mosaic-mosaic-v2`) + 모델 설정 →
 `run.py status/goals` → Claude Code CLI(`~/.local/bin/claude`, `SKIP_CLI=1`로 생략) → `--smoke`면 §4 smoke 실행·로그 확인.
 GPU가 80 GB가 아니면 `constraints.yaml`의 `gpu_min_free_mib`를 보라고 알려준다. 다시 실행해도 안전하다.
@@ -143,11 +143,11 @@ ledger 수치를 낸 환경과 같아진다. 이미지의 torch 2.10/2.11 + pyth
   `1103-100050` 설정을 한 번 그대로 재실행해 ledger 값과 비교한 뒤 실험을 재개하는 것이 안전하다.
 
 ## 3. 새 서버에서 고칠 것 (순서대로)
-1. **`encoder/harness/run.py` 1행 shebang** `#!/home/kyung/miniconda3/envs/mosaic/bin/python` → 새 env의 python 경로.
-   (또는 항상 `python harness/run.py ...`로 부른다. `run.py`는 실행 명령에 `sys.executable`을 쓰므로 그 외 절대 경로는 없다.)
+1. **`encoder/harness/.python`**(git 무시, 한 줄)에 env의 python 절대경로를 적는다(`remote_setup.sh`가 쓴다). `run.py`는 `#!/usr/bin/env python3`로 시작해
+   `.python`이 있으면 그 인터프리터로 자기 자신을 다시 실행하므로 어느 셸에서든 `harness/run.py ...`가 된다. 실행 명령에는 `sys.executable`을 쓴다.
 2. **`encoder/harness/constraints.yaml`의 `gpu_min_free_mib`**: GPU 메모리에 맞춘다. 관측 피크(프로세스당): amazon_book ≈ 9 GB,
    amazon_movie ≈ 15 GB, yelp 21~35 GB(학습 후반에 커진다). 80 GB 기준 현재값 `{default: 9000, amazon_movie: 16000, yelp: 36000}`.
-3. (필요 시) `.claude/skills/harness-tick/SKILL.md`의 `R=harness/run.py` 설명 — shebang을 못 고치면 `R="python harness/run.py"`.
+3. (필요 시) `.claude/skills/harness-tick/SKILL.md`의 `R=harness/run.py` 설명 — `.python`을 못 쓰면 env를 활성화하고 `R="python harness/run.py"`.
 4. `encoder/harness/state.json`은 마지막 실행 시각일 뿐이다(그대로 두거나 삭제).
 
 ## 4. 동작 확인 (실험 재개 전)
