@@ -35,6 +35,11 @@ GPU가 80 GB가 아니면 `constraints.yaml`의 `gpu_min_free_mib`를 보라고 
 **14:41 결정: 코드는 GitHub로, 데이터·로그는 노트북 역터널로 스트리밍.** 이 서버 디스크가 가득 차서(2.1 GB 남음) 아카이브를 만들 수 없고,
 이 서버에는 GitHub 푸시 자격(토큰/키)이 없다.
 
+**14:48 터널 연결 성공.** 컨테이너 = `main1`, user `work`, vfolder `/home/work/minkyung`(NAS 20 TB, 15 TB 여유), GPU A100 80 GB × 1,
+시스템 python 3.10.12, rsync·git 있음, conda 없음(remote_setup.sh가 vfolder 안에 miniconda를 설치). 터널이 열린 김에 **코드 트리(.git 포함,
+브랜치 `migrate-20261104` 커밋 그대로)와 데이터·로그를 통째로 rsync**했으므로 아래 (A)의 GitHub 단계는 선택이고 (C)의 git init/fetch는 필요 없다
+(이미 같은 커밋이 있다; 나중에 어느 쪽에서든 `git push -u origin migrate-20261104`). GPU 1장이라 동시 실행 수는 `gpu_min_free_mib`가 정한다.
+
 (A) 코드 — 비공개 리포 `Smingaeng/mosaic_v2`. 이 서버에서 브랜치 **`migrate-20261104`**에 작업 트리 전체(실험 노브 + `encoder/harness/` + `.claude/`)를
 커밋해 두었다. 푸시는 VS Code 통합 터미널(이 서버)에서 한다(VS Code가 GitHub 인증을 넘겨준다):
 ```bash
@@ -69,6 +74,25 @@ bash encoder/harness/migrate.sh work@localhost /home/work/minkyung/mosaic_v2 --s
 2. `/loop 30m /harness-tick`. 첫 tick은 §5대로(q092 먼저 재실행). smoke(§4 또는 `--smoke`)가 통과한 뒤에 시작한다.
 3. GPU가 바뀌면 같은 환경이라도 수치가 소수점 넷째 자리에서 흔들린다(§2-1): Book 후보 `1103-100050` 설정을 한 번 재실행해
    ledger 값과 비교한 뒤 실험을 재개한다.
+
+컨테이너에서 remote_setup.sh를 돌리며 고친 것(둘 다 커밋됨): (1) 최신 Miniconda는 defaults 채널에 Anaconda 약관 동의를 요구해
+`conda create`가 `CondaToSNonInteractiveError`로 멈춘다 → env 생성을 `--override-channels -c conda-forge`로 바꿨다(python 3.10.22 그대로).
+(2) 컨테이너의 nvidia-smi가 `utilization.gpu`를 `[Not Found]`로 내놓아 `run.py gpu_table()`이 ValueError → 숫자가 아닌 필드는 0으로 읽도록
+고쳤다(메모리 필드는 정상이라 GPU 메모리 가드는 그대로 동작).
+
+**15:07 설치 완료 (컨테이너).** `remote_setup.sh --smoke` 통과: env `/home/work/minkyung/miniconda3/envs/mosaic`(python 3.10.22, torch 2.8.0+cu128,
+A100 80 GB 1장, 드라이버 580.173.02), `run.py status/goals` 표가 이 서버와 동일, Claude Code CLI 2.1.318(`~/.local/bin/claude`), 3분 smoke 52 epoch.
+smoke의 초기 검증 곡선은 Book 후보 `1103-100050`의 로그와 소수점 넷째 자리에서만 다르다(같은 seed·데이터; A100 vs H100):
+| epoch | 이 서버 R@5 / R@10 / R@20 | 컨테이너 R@5 / R@10 / R@20 |
+|---|---|---|
+| 0 | .0326 / .0539 / .0848 | .0326 / .0537 / .0848 |
+| 12 | .0198 / .0322 / .0472 | .0195 / .0315 / .0473 |
+vfolder 사용량: miniconda 8.2 GB + 리포 6.6 GB. 컨테이너 git 트리는 이 서버의 `migrate-20261104` 최신 커밋과 동일하게 맞춰 두었다.
+
+**영속성(중요).** `/home/work/.claude`(로그인·메모리)와 `/home/work/.local/bin/claude`는 세션이 끝나면 사라진다. 두 가지 중 하나:
+- CLI(tmux) 경로: `export CLAUDE_CONFIG_DIR=/home/work/minkyung/.claude` 후 `claude` — 메모리·설정 사본을 이 경로에도 넣어 두었다(로그인은 처음 한 번).
+- VS Code 확장 경로: 웹 UI에서 이름이 `.claude`, `.local`인 vfolder를 만들어 두면 다음 세션부터 `~/.claude`, `~/.local`로 자동 마운트된다.
+  새 세션에서는 `bash encoder/harness/remote_setup.sh /home/work/minkyung/mosaic_v2`를 한 번 더 돌리면 빠진 것(메모리 사본, CLI)만 채운다.
 
 ## 1. 옮길 것 (git clone만으로는 부족하다)
 작업 트리에는 **커밋되지 않은 변경**이 있다: 실험 노브(persona_mosaic.py / persona_mosaic.yml / mosaic.py의 분석용 llm_prior /
@@ -107,7 +131,7 @@ ledger 수치를 낸 환경과 같아진다. 이미지의 torch 2.10/2.11 + pyth
   torch 2.8.0 cu128 휠의 arch list는 sm_70~sm_120(A100, H100, Blackwell 모두 포함).
 - 설치(권장, 최소):
   ```bash
-  conda create -n mosaic python=3.10.22 -y        # miniconda 없으면 먼저 설치. venv도 가능: python3.10 -m venv ~/mosaic-venv
+  conda create -n mosaic --override-channels -c conda-forge python=3.10.22 -y   # defaults 채널은 Anaconda 약관 동의를 요구(CondaToSNonInteractiveError); conda-forge는 불필요. venv도 가능
   conda activate mosaic
   pip install -r encoder/harness/requirements-min.txt
   python -c "import torch;print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"   # 2.8.0+cu128 12.8 True

@@ -390,10 +390,17 @@ def gpu_table() -> list[dict]:
         ).stdout
     except Exception:
         return [{"index": 0, "mem_used": 0, "mem_total": 0, "util": 0}]
+    def _int(x: str, default: int = 0) -> int:
+        # containers (e.g. Backend.AI) report "[Not Found]" / "[N/A]" for fields they do not expose (utilization.gpu)
+        try:
+            return int(x)
+        except ValueError:
+            return default
+
     rows = []
-    for line in out.strip().splitlines():
+    for i, line in enumerate(out.strip().splitlines()):
         idx, used, total, util = [x.strip() for x in line.split(",")]
-        rows.append({"index": int(idx), "mem_used": int(used), "mem_total": int(total), "util": int(util)})
+        rows.append({"index": _int(idx, i), "mem_used": _int(used), "mem_total": _int(total), "util": _int(util)})
     return rows or [{"index": 0, "mem_used": 0, "mem_total": 0, "util": 0}]
 
 

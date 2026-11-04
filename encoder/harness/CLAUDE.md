@@ -3,7 +3,7 @@
 이 디렉터리(encoder/harness)의 작업과 `/harness-tick`에서는 이 문서가 최우선이다. 기계적으로 검사되는 부분은
 `constraints.yaml`(run.py가 실행 전에 강제), 실행·기록은 `run.py`, 실험 대기열은 `queue.yaml`, 모든 결과는
 `ledger.jsonl`, 결정의 역사는 `JOURNAL.md`, 분석 양식은 `ANALYSIS_TEMPLATE.md`. 기준값은 `references.yaml`.
-실행 명령은 항상 `/home/kyung/mosaic_v2/encoder`에서 `harness/run.py ...` (shebang이 mosaic conda python을 쓴다).
+실행 명령은 항상 리포의 `encoder/`에서 `harness/run.py ...` (shebang이 mosaic conda python을 쓴다).
 
 ## 0. 우선순위 — 현재 단계 (사용자, 2026-11-03 23:50 갱신)
 - **2026-11-04 11:22 실험 종료(서버 이전).** 실행 0개, cron 중지. 새 서버에서 재개하려면 먼저 `harness/HANDOFF.md`를 따른다
@@ -133,7 +133,7 @@ harness/run.py show ID | diag ID | note ID --file f.md | mark ID --status invali
   trainer의 set_epoch 훅, mosaic.py의 분석용 llm_prior)는 현재 코드에 없다. 커밋 상태에 있는 노브는 persona_shuffle /
   item_shuffle / shuffle_seed, persona_align_weight, item_text, text_dim 등 yml에 보이는 것뿐이다.
 - 복원 패치: `harness/patches/2026-11-02-experimental-knobs.patch` (백업에서 재구성, `git apply --check` 통과, 단위 smoke 통과).
-  적용은 사용자 결정이다 (`cd /home/kyung/mosaic_v2 && git apply encoder/harness/patches/2026-11-02-experimental-knobs.patch`).
+  적용은 사용자 결정이다 (리포 루트에서 `git apply encoder/harness/patches/2026-11-02-experimental-knobs.patch`).
   에이전트는 이 패치를 스스로 적용하지 않는다 (tier B). 적용 전에는 그 노브를 쓰는 큐 항목(q003, q004, q006, q008)은 proposed로 둔다.
 - `run.py validate`는 현재 yml의 키만 허용하므로, 패치 적용 여부가 자동으로 반영된다.
 - 2026-11-04 09:50: `prior_composition=mix`(유저 행 = unit(facet_k + 평균)) 추가 — harness/patches/2026-11-04-q076-mix-composition.patch,

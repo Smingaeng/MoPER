@@ -3,7 +3,7 @@ name: harness-tick
 description: One tick of the PERSONA-MOSAIC experiment harness (encoder/harness) - collect finished runs, analyse them against the goals, launch the next ready queue entries, append the journal. Use on a schedule, e.g. "/loop 30m /harness-tick".
 ---
 
-Work from /home/kyung/mosaic_v2/encoder. Read harness/CLAUDE.md first; its rules override everything below.
+Work from the repo's `encoder/` directory (e.g. /home/kyung/mosaic_v2/encoder on the old server, /home/work/minkyung/mosaic_v2/encoder on the Backend.AI container). Read harness/CLAUDE.md first; its rules override everything below.
 `R=harness/run.py` (runs with the mosaic conda python via its shebang).
 If that shebang path does not exist on this machine (after a server move), use `R="python harness/run.py"` with the
 `mosaic` conda env activated, and read harness/HANDOFF.md once before the first tick.

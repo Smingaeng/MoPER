@@ -35,7 +35,10 @@ fi
 if conda env list | awk '{print $1}' | grep -x "$ENV_NAME" >/dev/null; then
   echo "env $ENV_NAME exists"
 else
-  conda create -y -n "$ENV_NAME" "python=$PY_VER"
+  # conda-forge only: the Miniconda default channels now require accepting Anaconda's Terms of Service
+  # (CondaToSNonInteractiveError); conda-forge has no such step. Fall back to the latest 3.10.x if the exact patch is missing.
+  conda create -y -n "$ENV_NAME" --override-channels -c conda-forge "python=$PY_VER" \
+    || conda create -y -n "$ENV_NAME" --override-channels -c conda-forge "python=${PY_VER%.*}"
 fi
 set +u; conda activate "$ENV_NAME"; set -u
 PY=$(python -c 'import sys; print(sys.executable)')
