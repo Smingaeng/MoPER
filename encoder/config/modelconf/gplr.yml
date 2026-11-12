@@ -1,0 +1,44 @@
+optimizer:
+  name: adam
+  lr: 1.0e-3                     # release (README): 0.001, Adam
+  weight_decay: 0                # the L2 term (reg_weight) is part of the model's loss
+
+# epoch / test_step / patience / early_stop_metric are shared by every model for a fair comparison
+# (the release: 1000 epochs, validation every epoch, no early stopping, F1@K and NDCG@K).
+train:
+  epoch: 3000
+  # The loss is a sum over the batch while the persona L2 and the de-correlation term enter once per step, so
+  # reg_weight / afd_alpha belong to this batch size.  Release: 80000 for A-LGCN3, 40000 for LGCN3.
+  batch_size: 80000
+  save_model: false
+  loss: pairwise
+  test_step: 3
+  reproducible: true
+  seed: 2025
+  patience: 30                   # evaluations (one every test_step epochs) without a new best before early stopping
+  early_stop_metric: goal_mean   # goal_mean: validation mean of recall@5, recall@10, ndcg@5, ndcg@10 | recall_last: recall@20
+
+test:
+  metrics: [recall, ndcg]
+  k: [5, 10, 20]
+  batch_size: 1024
+
+data:
+  type: general_cf
+  name: yelp
+
+model:
+  name: gplr
+  type: discriminative
+  embedding_size: 32             # release: 128
+
+  # ---- LLM personas (generation/gplr/generate_personas.py) ----
+  persona_dir: gplr              # data/<dataset>/<persona_dir>/{persona2idx,tri_graph_uidx2pidx,tri_graph_tidx2pidx}.json
+
+  # ---- low-pass GCN over users, items and personas ----
+  frequency: 128                 # eigenvectors of the graph Laplacian kept by the low-pass filter (release: 128)
+  layer_num: 1                   # release: 1
+  # The values below are the release's A-LGCN3 command (OnlineRetail), not tuned for the datasets of this repository.
+  # LGCN3 (no de-correlation loss): afd_alpha 0, reg_weight 5.0e-3 and train.batch_size 40000.
+  reg_weight: 2.0e-2             # lamda: weight of the L2 term
+  afd_alpha: 1.0e-4              # weight of the de-correlation loss; 0 = LGCN3

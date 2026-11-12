@@ -33,6 +33,10 @@ class Trainer(object):
         optim_config = configs['optimizer']
         if optim_config['name'] == 'adam':
             self.optimizer = optim.Adam([q for q in model.parameters() if q.requires_grad], lr=optim_config['lr'], weight_decay=optim_config['weight_decay'])
+        elif optim_config['name'] == 'rsgd':  # Riemannian SGD on the Lorentz manifold (HyperLLM)
+            from models.lorentz import RiemannianSGD
+            self.optimizer = RiemannianSGD([q for q in model.parameters() if q.requires_grad], lr=optim_config['lr'],
+                                           momentum=optim_config['momentum'], weight_decay=optim_config['weight_decay'])
 
     def train_epoch(self, model, epoch_idx):
         # prepare training data

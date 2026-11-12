@@ -1,0 +1,64 @@
+optimizer:
+  name: adam
+  lr: 1.0e-3
+  weight_decay: 0                # TALL's weight decay (reg_weight / expert_num) is part of the model's loss
+
+# epoch / test_step / patience / early_stop_metric are shared by every model for a fair comparison
+# (TALL itself: validation every epoch, patience 15 on the mean validation NDCG@{1,5,10,20}).
+train:
+  epoch: 3000
+  batch_size: 256                # users per step (TALL: 512 on ML-1M, 256 on Yelp and Amazon CDs)
+  save_model: false
+  loss: pairwise                 # what the data handler builds; TALL installs its own loader of user ids
+  test_step: 3
+  reproducible: true
+  seed: 2025
+  patience: 30                   # evaluations (one every test_step epochs) without a new best before early stopping
+  early_stop_metric: goal_mean   # goal_mean: validation mean of recall@5, recall@10, ndcg@5, ndcg@10 | recall_last: recall@20
+
+test:
+  metrics: [recall, ndcg]
+  k: [5, 10, 20]
+  batch_size: 1024
+
+data:
+  type: general_cf
+  name: yelp
+
+model:
+  name: tall
+  type: generative
+
+  # ---- experts: MultVAE (TALL: one hidden layer of size 100, 100 experts on every dataset) ----
+  expert_num: 100
+  enc_dims: [100]                # hidden sizes of the encoder; the last one is the latent size
+  dropout: 0.0
+  anneal_cap: 0.2                # upper bound of the KL weight
+  total_anneal_steps: 200000     # training steps over which the KL weight grows from 0 to anneal_cap
+
+  # ---- held-out items read by the gate and the adaptive weight module ----
+  # valid:   the validation interactions, as TALL is published (the gate reads them at prediction time too)
+  # holdout: holdout_ratio of every user's training interactions (training set only, like the other models here)
+  gate_source: valid
+  holdout_ratio: 0.125           # used by holdout; TALL's own split is 70/10/20: held-out = 1/8 of what is not test
+
+  # ---- adaptive weight module ----
+  loss_window: 8                 # epochs of held-out-loss change averaged per user (fixed in the TALL code)
+  # reg_weight: weight decay before the division by expert_num (TALL: 1e-3 on ML-1M, 1e-4 on the other datasets)
+  # gap_window: T, epochs trained with equal user weights before the adaptive weights start
+  # alpha:      width of the weight map, weight = max((change - mean change + 2 alpha) / (2 alpha), 1e-8)
+  # TALL reports T=40, alpha=0.08 (ML-1M); T=15, alpha=0.6 (Yelp); T=25, alpha=0.3 (Amazon CDs & Vinyl).
+  reg_weight: 1.0e-4
+  gap_window: 25
+  alpha: 0.3
+
+  yelp:
+    gap_window: 15
+    alpha: 0.6
+  # Amazon CDs & Vinyl setting
+  amazon_book:
+    gap_window: 25
+    alpha: 0.3
+  amazon_movie:
+    gap_window: 25
+    alpha: 0.3

@@ -1,0 +1,48 @@
+optimizer:
+  name: rsgd                     # Riemannian SGD on the Lorentz manifold (models/lorentz.py), also used by phase 1
+  lr: 1.0e-3
+  weight_decay: 5.0e-4
+  momentum: 0.95
+
+# Shared by every model for a fair comparison (HyperLLM itself: lr 1e-3, batch 4096, 3 layers; d=50, 500 epochs,
+# validation every epoch, patience 50).  Phase 1 runs under the same epoch / test_step / patience / early_stop_metric.
+train:
+  epoch: 3000
+  batch_size: 4096
+  save_model: false
+  loss: pairwise
+  test_step: 3
+  reproducible: true
+  seed: 2025
+  patience: 30                   # evaluations (one every test_step epochs) without a new best before early stopping
+  early_stop_metric: goal_mean   # goal_mean: validation mean of recall@5, recall@10, ndcg@5, ndcg@10 | recall_last: recall@20
+
+test:
+  metrics: [recall, ndcg]
+  k: [5, 10, 20]
+  batch_size: 1024
+
+data:
+  type: general_cf
+  name: yelp
+
+model:
+  name: hyperllm
+  type: discriminative
+  embedding_size: 32             # HyperLLM default: 50
+  layer_num: 3
+
+  # ---- phase 1: LLM embeddings (usr_emb_np.pkl / itm_emb_np.pkl) -> mixture of experts -> initial embeddings ----
+  # cached in save/checkpoint/hyperllm/phase1-<dataset>-...pt; any change of the settings it depends on retrains it
+  phase1_expert_num: 16          # paper: {12, 16, 20}
+  phase1_margin: 0.1             # m1, paper: {0.1, ..., 0.5}
+
+  # ---- phase 2: user-item graph + LLM tag graph ----
+  tag_dir: hyperllm              # data/<dataset>/<tag_dir>/{id_to_tag,tag_to_tag,tag_to_item}.json (generation/hyperllm/generate_tags.py)
+  tag_init_scale: 0.1            # tag embeddings start uniform in [-scale, scale]
+  cl_weight: 0.01                # weight of the contrast between the item representations of the two graphs
+  cl_temperature: 0.5
+  # The margins are tuned per dataset in the paper (m2 in [0.1, 4.0], m3 in [0.1, 1.0]); the values below are the
+  # released Amazon-Beauty setting, not tuned for the datasets of this repository.
+  margin: 1.6                    # m2: margin of the user-item loss (Toys 1.2, Sports 1.8, Beauty 1.6)
+  tag_margin: 0.9                # m3: margin of the tag loss      (Toys 0.6, Sports 1.3, Beauty 0.9)

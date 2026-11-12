@@ -8,7 +8,7 @@ DATA_DIR = os.path.join(os.path.dirname(ENCODER_DIR), 'data')
 
 def parse_configure(model=None, dataset=None):
     parser = argparse.ArgumentParser(description='mosaic_v2')
-    parser.add_argument('--model', type=str, default='persona_mosaic', help='Model name: persona_mosaic | promax')
+    parser.add_argument('--model', type=str, default='persona_mosaic', help='Model name: persona_mosaic | promax | tall | hyperllm | gplr')
     parser.add_argument('--dataset', type=str, default='yelp', help='Dataset name')
     parser.add_argument('--device', type=str, default='cuda', help='cpu or cuda')
     parser.add_argument('--seed', type=int, default=None, help='Random seed (default: train.seed of the model yml)')
