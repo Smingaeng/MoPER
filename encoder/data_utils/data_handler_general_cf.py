@@ -1,9 +1,9 @@
 import pickle
 import numpy as np
-from scipy.sparse import csr_matrix, coo_matrix, dok_matrix
+from scipy.sparse import csr_matrix, coo_matrix
 import scipy.sparse as sp
 from config.configurator import configs
-from data_utils.datasets_general_cf import PairwiseTrnData, PairwiseWEpochFlagTrnData, AllRankTstData
+from data_utils.datasets_general_cf import PairwiseTrnData, AllRankTstData
 import torch as t
 import torch.utils.data as data
 
@@ -47,7 +47,7 @@ class DataHandlerGeneralCF:
         d_inv_sqrt_mat = sp.diags(d_inv_sqrt)
         return mat.dot(d_inv_sqrt_mat).transpose().dot(d_inv_sqrt_mat).tocoo()
     
-    def _make_torch_adj(self, mat, self_loop=False):
+    def _make_torch_adj(self, mat):
         """Transform uni-directional adjacent matrix in coo_matrix into bi-directional adjacent matrix in torch.sparse.FloatTensor
 
         Args:
@@ -56,20 +56,8 @@ class DataHandlerGeneralCF:
         Returns:
             torch.sparse.FloatTensor: the bi-directional matrix
         """
-        if not self_loop:
-            a = csr_matrix((configs['data']['user_num'], configs['data']['user_num']))
-            b = csr_matrix((configs['data']['item_num'], configs['data']['item_num']))
-        else:
-            data = np.ones(configs['data']['user_num'])
-            row_indices = np.arange(configs['data']['user_num'])
-            column_indices = np.arange(configs['data']['user_num'])
-            a = csr_matrix((data, (row_indices, column_indices)), shape=(configs['data']['user_num'], configs['data']['user_num']))
-
-            data = np.ones(configs['data']['item_num'])
-            row_indices = np.arange(configs['data']['item_num'])
-            column_indices = np.arange(configs['data']['item_num'])
-            b = csr_matrix((data, (row_indices, column_indices)), shape=(configs['data']['item_num'], configs['data']['item_num']))
-
+        a = csr_matrix((configs['data']['user_num'], configs['data']['user_num']))
+        b = csr_matrix((configs['data']['item_num'], configs['data']['item_num']))
         mat = sp.vstack([sp.hstack([a, mat]), sp.hstack([mat.transpose(), b])])
         mat = (mat != 0) * 1.0
         mat = self._normalize_adj(mat)
@@ -86,17 +74,12 @@ class DataHandlerGeneralCF:
         tst_mat = self._load_one_mat(self.tst_file)
 
         self.trn_mat = trn_mat
-        self.train_data = self.trn_mat.tocsr()
         configs['data']['user_num'], configs['data']['item_num'] = trn_mat.shape
         self.torch_adj = self._make_torch_adj(trn_mat)
-        
-        if configs['model']['name'] == 'gccf':
-            self.torch_adj = self._make_torch_adj(trn_mat, self_loop=True)
 
-        if configs['train']['loss'] == 'pairwise':
-            trn_data = PairwiseTrnData(trn_mat)
-        elif configs['train']['loss'] == 'pairwise_with_epoch_flag':
-            trn_data = PairwiseWEpochFlagTrnData(trn_mat)
+        if configs['train']['loss'] != 'pairwise':
+            raise NotImplementedError("train.loss must be 'pairwise', got {!r}".format(configs['train']['loss']))
+        trn_data = PairwiseTrnData(trn_mat)
 
         val_data = AllRankTstData(val_mat, trn_mat)
         tst_data = AllRankTstData(tst_mat, trn_mat)

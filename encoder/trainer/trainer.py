@@ -1,16 +1,12 @@
 import os
-import time
-import random
-import numpy as np
-from numpy import random
 from copy import deepcopy
-from tqdm import tqdm
+import numpy as np
 import torch
 import torch.optim as optim
 from trainer.metrics import Metric
 from models.bulid_model import build_model
 from config.configurator import configs
-from .utils import DisabledSummaryWriter, log_exceptions
+from .utils import log_exceptions
 
 SAVE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'save')
 
@@ -19,7 +15,6 @@ def init_seed():
     if 'reproducible' in configs['train']:
         if configs['train']['reproducible']:
             seed = configs['train']['seed']
-            random.seed(seed)
             np.random.seed(seed)
             torch.manual_seed(seed)
             torch.cuda.manual_seed(seed)
@@ -27,8 +22,6 @@ def init_seed():
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.deterministic = True
 
-def naive_sparse2tensor(data):
-    return torch.FloatTensor(data.toarray())
 
 class Trainer(object):
     def __init__(self, data_handler, logger):
@@ -41,38 +34,7 @@ class Trainer(object):
         if optim_config['name'] == 'adam':
             self.optimizer = optim.Adam([q for q in model.parameters() if q.requires_grad], lr=optim_config['lr'], weight_decay=optim_config['weight_decay'])
 
-    def train_epoch_gen(self, model, epoch_idx):
-        train_list = list(range(configs['data']['user_num']))
-        np.random.shuffle(train_list)
-
-        # for recording loss
-        loss_log_dict = {}
-        ep_loss = 0
-        # start this epoch
-        model.train()
-        for batch_id, start_id in enumerate(range(0, configs['data']['user_num'], configs['train']['batch_size'])):
-            self.optimizer.zero_grad()
-            end_id = min(start_id + configs['train']['batch_size'], configs['data']['user_num'])
-            batch_data = self.data_handler.train_data[train_list[start_id:end_id]]
-            data = naive_sparse2tensor(batch_data).to(configs['device'])
-
-            loss, loss_dict = model.cal_loss(train_list[start_id:end_id], data)
-            ep_loss += loss.item()
-            loss.backward()
-            self.optimizer.step()
-
-            # record loss
-            for loss_name in loss_dict:
-                _loss_val = float(loss_dict[loss_name])
-                if loss_name not in loss_log_dict:
-                    loss_log_dict[loss_name] = _loss_val
-                else:
-                    loss_log_dict[loss_name] += _loss_val
-
-        if 'log_loss' in configs['train'] and configs['train']['log_loss']:
-            self.logger.log(loss_log_dict, save_to_log=False, print_to_console=True)
-
-    def train_epoch_dis(self, model, epoch_idx):
+    def train_epoch(self, model, epoch_idx):
         # prepare training data
         train_dataloader = self.data_handler.train_dataloader
         train_dataloader.dataset.sample_negs()
@@ -80,7 +42,6 @@ class Trainer(object):
         # for recording loss
         loss_log_dict = {}
         ep_loss = 0
-        steps = len(train_dataloader.dataset) // configs['train']['batch_size']
         # start this epoch
         model.train()
         for _, tem in enumerate(train_dataloader):
@@ -103,42 +64,44 @@ class Trainer(object):
             self.logger.log(loss_log_dict, save_to_log=False, print_to_console=True)
         return ep_loss / max(len(train_dataloader), 1)
 
+    def _early_stop_score(self, eval_result):
+        """Validation score watched by early stopping and best-epoch selection (train.early_stop_metric):
+          goal_mean   = mean of recall@5, recall@10, ndcg@5, ndcg@10 (the reported metrics)
+          recall_last = recall at the largest k"""
+        mode = str(configs['train'].get('early_stop_metric', 'recall_last')).lower()
+        if mode == 'recall_last':
+            return eval_result['recall'][-1]
+        if mode == 'goal_mean':
+            ks = list(configs['test']['k'])
+            vals = [float(eval_result[m][ks.index(k)]) for m in ('recall', 'ndcg') for k in (5, 10)]
+            return sum(vals) / len(vals)
+        raise ValueError("early_stop_metric must be 'recall_last' or 'goal_mean', got {!r}".format(mode))
+
     @log_exceptions
     def train(self, model):
         now_patience = 0
         best_epoch = 0
-        best_recall = -1e9
+        best_score = -1e9
         self.create_optimizer(model)
         train_config = configs['train']
 
-        time_list = list()
         for epoch_idx in range(train_config['epoch']):
             # train
-            start_time = time.time()
-            if hasattr(model, "set_epoch"):
-                model.set_epoch(epoch_idx)  # persona_mosaic: gate warm-up schedule
-            if configs['model']['type'] == 'discriminative':
-                ep_loss = self.train_epoch_dis(model, epoch_idx)
-            else:
-                ep_loss = self.train_epoch_gen(model, epoch_idx)
-            end_time = time.time()
-            time_list.append(end_time - start_time)
+            self.train_epoch(model, epoch_idx)
             # evaluate
             if epoch_idx % train_config['test_step'] == 0:
                 eval_result = self.evaluate(model, epoch_idx)
-                if epoch_idx % (train_config['test_step'] * 10) == 0:
-                    self.log_diagnostics(model, brief=True)
-                # test_result = self.test(model)
-                if eval_result['recall'][-1] > best_recall:
+                stop_score = self._early_stop_score(eval_result)
+                if stop_score > best_score:
                     now_patience = 0
                     best_epoch = epoch_idx
-                    best_recall = eval_result['recall'][-1]
+                    best_score = stop_score
                     best_state_dict = deepcopy(model.state_dict())
                 else:
                     now_patience += 1
 
                 # early stop
-                if now_patience == configs['train']['patience']:
+                if now_patience == train_config['patience']:
                     break
 
         # evaluation again
@@ -151,7 +114,6 @@ class Trainer(object):
         model = build_model(self.data_handler).to(configs['device'])
         model.load_state_dict(best_state_dict)
         test_result = self.test(model)
-        self.log_diagnostics(model)  # best-epoch model: gate / prior usage (models that define diagnostics())
 
         self.save_model(model)  # best-epoch parameters, if train.save_model
 
@@ -162,16 +124,6 @@ class Trainer(object):
         with open(test_file, 'a') as f:
             tag = configs['train'].get('tag', '')
             f.write("{}Best Epoch {}. Final test result: {}. \n".format('[{}] '.format(tag) if tag else '', best_epoch, test_result))
-
-    def log_diagnostics(self, model, brief=False):
-        diagnostics = getattr(model, 'diagnostics', None)
-        if diagnostics is None:
-            return
-        try:
-            for line in diagnostics(brief=brief):
-                self.logger.log(line)
-        except Exception as exc:  # never let a diagnostic kill a run
-            self.logger.log('[diag] failed: {!r}'.format(exc))
 
     @log_exceptions
     def evaluate(self, model, epoch_idx=None):
@@ -186,89 +138,15 @@ class Trainer(object):
         eval_result = self.metric.eval(model, self.data_handler.test_dataloader)
         self.logger.log_eval(eval_result, configs['test']['k'], data_type='Test set')
         return eval_result
-    
-    @log_exceptions
-    def test_save(self, model):
-        model.eval()
-        eval_result, candidate_set = self.metric.eval_save(model, self.data_handler.test_dataloader)
-        self.logger.log_eval(eval_result, configs['test']['k'], data_type='Test set')
-        return eval_result, candidate_set
 
     def save_model(self, model):
         if configs['train']['save_model']:
-            model_state_dict = model.state_dict()
             model_name = configs['model']['name']
-            if not configs['tune']['enable']:
-                save_dir_path = os.path.join(SAVE_DIR, 'checkpoint', model_name)
-
-                if not os.path.exists(save_dir_path):
-                    os.makedirs(save_dir_path)
-                tag = configs['train'].get('tag', '').replace(' ', '_').replace('=', '-')
-                path = '{}/{}-{}-{}{}.pth'.format(save_dir_path, model_name, configs['data']['name'], configs['train']['seed'],
-                                                 '-' + tag if tag else '')
-                torch.save(model_state_dict, path)
-                self.logger.log("Save model parameters to {}".format(path))
-            else:
-                save_dir_path = os.path.join(SAVE_DIR, 'checkpoint', model_name, 'tune')
-
-                if not os.path.exists(save_dir_path):
-                    os.makedirs(save_dir_path)
-                now_para_str = configs['tune']['now_para_str']
-                torch.save(
-                    model_state_dict, '{}/{}-{}.pth'.format(save_dir_path, model_name, now_para_str))
-                self.logger.log("Save model parameters to {}".format(
-                    '{}/{}-{}.pth'.format(save_dir_path, model_name, now_para_str)))
-
-class AutoCFTrainer(Trainer):
-    def __init__(self, data_handler, logger):
-        super(AutoCFTrainer, self).__init__(data_handler, logger)
-        self.fix_steps = configs['model']['fix_steps']
-
-    def train_epoch(self, model, epoch_idx):
-        # prepare training data
-        train_dataloader = self.data_handler.train_dataloader
-        train_dataloader.dataset.sample_negs()
-
-        # for recording loss
-        loss_log_dict = {}
-        ep_loss = 0
-        steps = len(train_dataloader.dataset) // configs['train']['batch_size']
-        # start this epoch
-        model.train()
-        for i, tem in tqdm(enumerate(train_dataloader), desc='Training Recommender', total=len(train_dataloader)):
-            self.optimizer.zero_grad()
-            batch_data = list(map(lambda x: x.long().to(configs['device']), tem))
-
-            if i % self.fix_steps == 0:
-                sampScores, seeds = model.sample_subgraphs()
-                encoderAdj, decoderAdj = model.mask_subgraphs(seeds)
-
-            loss, loss_dict = model.cal_loss(batch_data, encoderAdj, decoderAdj)
-
-            if i % self.fix_steps == 0:
-                localGlobalLoss = -sampScores.mean()
-                loss += localGlobalLoss
-                loss_dict['infomax_loss'] = localGlobalLoss
-
-            ep_loss += loss.item()
-            loss.backward()
-            self.optimizer.step()
-
-            # record loss
-            for loss_name in loss_dict:
-                _loss_val = float(loss_dict[loss_name]) / len(train_dataloader)
-                if loss_name not in loss_log_dict:
-                    loss_log_dict[loss_name] = _loss_val
-                else:
-                    loss_log_dict[loss_name] += _loss_val
-
-        # writer.add_scalar('Loss/train', ep_loss / steps, epoch_idx)
-
-        # log loss
-        if configs['train']['log_loss']:
-            self.logger.log_loss(epoch_idx, loss_log_dict)
-        else:
-            self.logger.log_loss(epoch_idx, loss_log_dict, save_to_log=False)
-
-
-
+            save_dir_path = os.path.join(SAVE_DIR, 'checkpoint', model_name)
+            if not os.path.exists(save_dir_path):
+                os.makedirs(save_dir_path)
+            tag = configs['train'].get('tag', '').replace(' ', '_').replace('=', '-')
+            path = '{}/{}-{}-{}{}.pth'.format(save_dir_path, model_name, configs['data']['name'], configs['train']['seed'],
+                                             '-' + tag if tag else '')
+            torch.save(model.state_dict(), path)
+            self.logger.log("Save model parameters to {}".format(path))

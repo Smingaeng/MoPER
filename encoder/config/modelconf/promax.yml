@@ -12,7 +12,8 @@ train:
   test_step: 3
   reproducible: true
   seed: 2025
-  patience: 20
+  patience: 30                   # evaluations (one every test_step epochs) without a new best before early stopping
+  early_stop_metric: goal_mean   # goal_mean: validation mean of recall@5, recall@10, ndcg@5, ndcg@10 | recall_last: recall@20
 
 test:
   metrics: [recall, ndcg]
@@ -42,16 +43,6 @@ model:
     sdr_weight: 1.5
     s2dr_weight: 0.05
   amazon_movie:
-    layer_num: 3
-    reg_weight: 1.0e-6
-    sdr_weight: 1.5
-    s2dr_weight: 0.05
-  yelp_s50:   # 50% of the training interactions (sparsity study), same hyper-parameters as yelp
-    layer_num: 3
-    reg_weight: 1.0e-6
-    sdr_weight: 0.5
-    s2dr_weight: 0.1
-  amazon_book_h50:   # 50% of the users and items (pilot), same hyper-parameters as amazon_book
     layer_num: 3
     reg_weight: 1.0e-6
     sdr_weight: 1.5

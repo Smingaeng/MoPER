@@ -1,6 +1,7 @@
 /data
 encoder/save/
 __pycache__/
-encoder/harness/runs/
-encoder/harness/state.json
-encoder/harness/.python
+
+# experiment harness, its records and the agent skill that drives it: kept locally, not tracked
+encoder/harness/
+.claude/
