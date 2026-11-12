@@ -1,7 +1,0 @@
-- [PERSONA-MOSAIC design](persona-mosaic-design.md) — issue #2 spec, data facts, and the decisions taken in persona_mosaic.py
-- [mosaic_v2 environment](mosaic-v2-environment.md) — conda env path, run command, GPU 1 for tests, no gh CLI
-- [No copying sibling projects](no-copying-sibling-projects.md) — implement from instructions, don't reference /home/kyung/PersonaMosaic code
-- [Clustering, not segment](clustering-not-segment-terminology.md) — never say "segment" for persona k-means groups; use clustering/cluster everywhere
-- [PERSONA-MOSAIC paper notation](persona-mosaic-paper-notation.md) — Section 4 rewritten 2026-10-28; symbols (p, c^e, sigma, d_p, K) and which MOSAIC equations stay verbatim
-- [Item persona vs RLMRec profile](item-persona-vs-profile.md) — one-per-item LLM personas already exist; 2026-10-28 offline comparison, persona_emb_one.pkl facts
-- [No copying baseline contributions](no-copying-baseline-contributions.md) — never port ProMax SDR/S2DR etc.; Book refs: ProMax d=32 .1588, MOSAIC/PERSONA ~.166; Yelp below ProMax

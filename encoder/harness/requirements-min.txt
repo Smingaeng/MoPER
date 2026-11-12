@@ -1,9 +1,0 @@
-# PERSONA-MOSAIC minimal environment (2026-11-04). Matches the server the ledger was produced on:
-# python 3.10.22, torch 2.8.0+cu128 (PyPI torch==2.8.0 on Linux is the cu128 build and pulls nvidia-*-cu12 12.8.x),
-# numpy 2.0.2, scipy 1.13.1. The code imports only these external packages (torch_scatter/torch_sparse/cupy
-# were installed on the old server but are never imported). Full copy: requirements-frozen.txt / environment.yml.
-torch==2.8.0
-numpy==2.0.2
-scipy==1.13.1
-PyYAML==6.0.3
-tqdm==4.67.1
