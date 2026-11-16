@@ -19,14 +19,7 @@ and every item by its profile embedding in the same text space. MoPER works in t
 
 ## 📝 Environment
 
-Clone the repository:
-
-```bash
-git clone --depth 1 https://github.com/Smingaeng/MoPER.git
-cd MoPER
-```
-
-Then create a conda environment:
+Create a conda environment:
 
 ```bash
 conda create -y -n moper python=3.10
