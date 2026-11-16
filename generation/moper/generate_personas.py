@@ -416,7 +416,7 @@ def build(ds, uids, out_dir, rng, raw_root, reference_only=False, communities=No
                cutpoints=cut, quantiles=quantiles,
                medians={k: round(float(np.nanmedian([s[k] for s in all_stats.values() if s.get(k) is not None])), 3) for k in keys})
     os.makedirs(out_dir, exist_ok=True)
-    ref["communities"] = communities or "MOSAIC community_assignments.pkl"
+    ref["communities"] = communities or "community_assignments.pkl"
     ref["lift_baseline"] = "home city" if sig.user_group is not None else "all users"
     json.dump(ref, open(os.path.join(out_dir, f"reference{suffix}.json"), "w"), indent=1)
     if reference_only:
