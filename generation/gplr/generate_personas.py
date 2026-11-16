@@ -1,50 +1,3 @@
-"""LLM personas for GPLR (SIGIR'25, "You Are What You Bought"; model: encoder/models/general_cf/gplr.py).
-
-Three LLM stages, then the propagation of generation/gplr/gplr.py:
-
-  1. Persona set (paper, appendix C; the release ships only the resulting list).  40 prompts with the purchase
-     histories of 100 random users each ask for 20 persona candidates; 8 prompts merge 5 random candidate sets
-     into 20 personas each; one prompt reduces those 8 sets to the final 20 personas (name + definition).
-     Skipped when data/<dataset>/gplr/persona_set.json exists: put your own list there to use it
-     ([{"name": ..., "definition": ...}, ...]).
-  2. Item personas (src/persona_collection.ipynb, section 3): every item is linked to at most 5 personas.
-  3. User personas (src/gplr.ipynb): `--sample_rate` of the users are labeled by the LLM (at most 5 personas, or
-     "Unrepresentable") in `--rounds` rounds.  The first round is random, the next ones take the users with the
-     largest diversity-uncertainty score under the labels collected so far.  The remaining users receive the
-     `--top_k` personas with the largest affinity to the labeled users.  `--sample_rate 1` labels every user.
-
-The script writes, in the format of the GPLR release:
-
-    data/<dataset>/gplr/persona_set.json              [{name, definition}]   position = persona id
-    data/<dataset>/gplr/persona2idx.json              {persona name: persona id}
-    data/<dataset>/gplr/tri_graph_tidx2pidx.json      {item id: [persona ids]}
-    data/<dataset>/gplr/tri_graph_uidx2pidx.json      {user id: [persona ids]}   LLM labels + GPLR predictions
-    data/<dataset>/gplr/tri_graph_uidx2pidx_llm.json  {user id: [persona ids]}   the LLM-labeled users only
-    data/<dataset>/gplr/gplr_meta.json                settings and counts
-
-Usage (from the repository root; needs `pip install anthropic` and Anthropic credentials, e.g. ANTHROPIC_API_KEY):
-
-    python generation/gplr/generate_personas.py --dataset amazon_book --domain "books on Amazon"
-    python generation/gplr/generate_personas.py --dataset yelp --domain "businesses on Yelp"
-
---item_text (default: data/<dataset>/<dataset>_item_profile.jsonl) is the text of every item, indexed by the item
-ids of data/<dataset>/trn_mat.pkl: a .pkl / .json holding a dict {item id: text} or a list, or a .jsonl with one
-item per line.  An entry is a string or a dict (fields title / name / categories / description / profile /
-summarization / summary / reasoning / text; a 'response' field holding the JSON answer of the profile LLM is
-unpacked first).  The datasets here have no item names and no purchase counts: a user's purchase history lists
-the short text of each training item (title, else summarization), and an item is labeled from its full text.
-
-The prompts follow the paper and the release.  Changed: the answers are requested as JSON objects (the persona
-names are an enum, so the release's table of misspelled names is not needed), the examples that name
-OnlineRetail products or personas are left out, one sentence says what the items are (--domain), and the two
-merge prompts ask for definitions without remarks about the selection.
-
-The requests go through the Message Batches API; `--direct N` sends them one by one from N threads instead (twice
-the price, no waiting for batches: the user rounds depend on each other and run one batch after the other).  The
-answers are kept in data/<dataset>/gplr/raw/, so a re-run resumes a submitted batch and asks only for what has no
-answer yet.  `--build_only` rebuilds the output files from the stored answers, e.g. with another --top_k, --beta
-or --epsilon; `--dry_run` prints one prompt of each stage and sends nothing.
-"""
 import argparse
 import hashlib
 import json
@@ -59,15 +12,16 @@ import numpy as np
 import scipy.sparse as sp
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gplr import GPLR  # noqa: E402
+from gplr import GPLR
 
+API_KEY = ""
+MODEL = "claude-haiku-5-5"
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-BATCH_LIMIT = 50000  # requests per batch (API limit: 100,000 requests or 256 MB)
+BATCH_LIMIT = 50000
 UNREPRESENTABLE = 'Unrepresentable'
 SHORT_FIELDS = ('title', 'name', 'summarization', 'summary', 'profile', 'description', 'text')
 FULL_FIELDS = ('title', 'name', 'categories', 'description', 'profile', 'summarization', 'summary', 'reasoning', 'text')
 
-# persona-set generation (paper, appendix C)
 STEP1_USERS, STEP1_SETS, STEP2_PICK, STEP2_SETS = 100, 40, 5, 8
 
 STEP1_SYSTEM = ("You are an assistant skilled at summarizing, capable of deducing high-level consumer keywords "
@@ -219,17 +173,15 @@ def label_schema(names):
     }
 
 
-# ----------------------------------------------------------------------------- item text
 def _clean(text):
     return re.sub(r'\s+', ' ', str(text)).strip()
 
 
 def _entry_texts(entry):
-    """(short, full) text of one item entry."""
     if isinstance(entry, dict) and isinstance(entry.get('response'), str):
         try:
             inner = json.loads(entry['response'])
-        except ValueError:  # a few answers of the profile LLM are not valid JSON: keep their text without the wrapping
+        except ValueError:
             inner = re.sub(r'"(summarization|reasoning)"\s*:', ' ', entry['response'])
             inner = re.sub(r'[{}"]', ' ', inner).replace("\\'", "'").replace('\\n', ' ').strip(' ,')
         entry = inner if isinstance(inner, (dict, str)) else ''
@@ -250,7 +202,6 @@ def _entry_texts(entry):
 
 
 def load_item_texts(path, item_num):
-    """Short and full text of the items 0..item_num-1 ('' where the file has none)."""
     if path.endswith('.pkl'):
         with open(path, 'rb') as f:
             raw = pickle.load(f)
@@ -276,7 +227,6 @@ def load_item_texts(path, item_num):
 
 
 def describe_user(user, items, short):
-    """A user's purchase history in words (llm_connector/Collector.describe_user, without purchase counts)."""
     listed = [short[item] for item in items if short[item]]
     if not listed:
         return ''
@@ -284,11 +234,7 @@ def describe_user(user, items, short):
             "bought: {}").format(user, len(listed), '; '.join("({}) {}".format(n + 1, text) for n, text in enumerate(listed)))
 
 
-# ----------------------------------------------------------------------------- LLM
 class LLM:
-    """Requests {id: (system, prompt, schema)} of a stage -> answers {id: parsed JSON}, stored in
-    raw/<stage>.jsonl.  Batches that were submitted and not collected yet are listed in raw/batches.json."""
-
     def __init__(self, args, raw_dir):
         self.args, self.raw_dir = args, raw_dir
         self.state_path = os.path.join(raw_dir, 'batches.json')
@@ -296,7 +242,6 @@ class LLM:
         self._sdk = None
         self.tokens = {}
 
-    # ---- storage
     def _path(self, stage):
         return os.path.join(self.raw_dir, stage + '.jsonl')
 
@@ -326,7 +271,6 @@ class LLM:
             json.dump(pending, f)
 
     def _store(self, stage, out, request_id, message):
-        """Write the answer of one finished request; False when the message holds no usable answer."""
         used = self.tokens.setdefault(stage, [0, 0])
         used[0] += message.usage.input_tokens
         used[1] += message.usage.output_tokens
@@ -342,17 +286,16 @@ class LLM:
         out.write(json.dumps({'id': request_id, 'answer': answer}, ensure_ascii=False) + '\n')
         return True
 
-    # ---- API
     def _client(self):
         if self._sdk is None:
             import anthropic
-            self._sdk = (anthropic, anthropic.Anthropic(max_retries=5))
+            self._sdk = (anthropic, anthropic.Anthropic(api_key=API_KEY or None, max_retries=5))
         return self._sdk
 
     def _params(self, request):
         system, prompt, schema = request
         return dict(
-            model=self.args.model,
+            model=MODEL,
             max_tokens=16000,
             system=system,
             output_config={"effort": self.args.effort, "format": {"type": "json_schema", "schema": schema}},
@@ -380,7 +323,7 @@ class LLM:
                         self._store(stage, out, request_id, message)
                         out.flush()
         except anthropic.AuthenticationError:
-            sys.exit("Anthropic credentials are missing or invalid (set ANTHROPIC_API_KEY or run `ant auth login`).")
+            sys.exit("Anthropic credentials are missing or invalid: set API_KEY at the top of this file.")
 
     def _send_batches(self, stage, requests):
         anthropic, client = self._client()
@@ -397,7 +340,7 @@ class LLM:
             try:
                 batch = client.messages.batches.create(requests=batch_requests)
             except anthropic.AuthenticationError:
-                sys.exit("Anthropic credentials are missing or invalid (set ANTHROPIC_API_KEY or run `ant auth login`).")
+                sys.exit("Anthropic credentials are missing or invalid: set API_KEY at the top of this file.")
             except anthropic.RateLimitError as e:
                 sys.exit("Rate limited while creating the batch; run the same command again later. ({})".format(e.message))
             except anthropic.APIStatusError as e:
@@ -409,7 +352,6 @@ class LLM:
             print("  {}: submitted batch {} ({} requests)".format(stage, batch.id, len(batch_requests)))
 
     def submit(self, stage, requests):
-        """Send the requests that have no stored answer, unless a batch of the stage is still to be collected."""
         if self.offline or stage in self._pending():
             return
         answered = self.answers(stage)
@@ -422,7 +364,6 @@ class LLM:
             self._send_batches(stage, requests)
 
     def collect(self, stage):
-        """Wait for the submitted batches of the stage and store their answers."""
         batch_ids = self._pending().get(stage)
         if self.offline or not batch_ids:
             return
@@ -450,7 +391,6 @@ class LLM:
         self._set_pending(stage, None)
 
     def ask(self, stage, requests):
-        """Answers of the given requests; a request without an answer is sent once more before it is given up."""
         for _ in range(2):
             self.submit(stage, requests)
             self.collect(stage)
@@ -464,9 +404,7 @@ class LLM:
             print("  {}: {} input tokens, {} output tokens".format(stage, tokens_in, tokens_out))
 
 
-# ----------------------------------------------------------------------------- stage 1: persona set
 def _persona_list(answer, limit=None):
-    """Personas of an answer: unique names, without the reserved one."""
     personas, seen = [], {UNREPRESENTABLE.lower()}
     for row in (answer or {}).get('personas', []):
         name, definition = _clean(row.get('name', '')), _clean(row.get('definition', ''))
@@ -528,9 +466,7 @@ def generate_persona_set(llm, trn, short, args):
     return personas
 
 
-# ----------------------------------------------------------------------------- stages 2 and 3: labels
 def _label_ids(answer, persona2idx, limit):
-    """Persona ids of a label answer, at most `limit`; None when the answer says "Unrepresentable"."""
     names = list(dict.fromkeys((answer or {}).get('personas', [])))
     if UNREPRESENTABLE in names:
         return None
@@ -555,7 +491,6 @@ def user_request(user, trn, short, personas, args):
 
 
 def load_rounds(args, raw_dir):
-    """Sampling settings and the user rounds drawn by an earlier run (raw/rounds.json)."""
     settings = {'sample_rate': args.sample_rate, 'rounds': args.rounds, 'epsilon': args.epsilon, 'seed': args.seed}
     rounds_path = os.path.join(raw_dir, 'rounds.json')
     drawn = []
@@ -563,7 +498,7 @@ def load_rounds(args, raw_dir):
         with open(rounds_path, 'r', encoding='utf-8') as f:
             stored = json.load(f)
         if args.build_only:
-            settings = stored['settings']  # the rounds are replayed as they were drawn
+            settings = stored['settings']
         elif stored['settings'] != settings:
             sys.exit("{} was drawn with {}, not with {}.\nKeep those settings, remove the file to draw the rounds "
                      "again (stored LLM answers are reused), or write to another --out_dir.".format(
@@ -573,8 +508,6 @@ def load_rounds(args, raw_dir):
 
 
 def label_users(llm, trn, short, personas, persona2idx, args, rounds):
-    """GPLR rounds: sample -> LLM labels -> add the labels.  The sampled users of every round are stored, so a
-    re-run continues after the last round that was drawn."""
     user_num = trn.shape[0]
     settings, drawn, rounds_path = rounds
     budget = min(int(round(settings['sample_rate'] * user_num)), user_num)
@@ -592,7 +525,7 @@ def label_users(llm, trn, short, personas, persona2idx, args, rounds):
             drawn.append(users)
             with open(rounds_path, 'w', encoding='utf-8') as f:
                 json.dump({'settings': settings, 'rounds': drawn}, f)
-        gplr.asked.update(users)  # also for a stored round: its users are not drawn again
+        gplr.asked.update(users)
         requests = {user: user_request(user, trn, short, personas, args) for user in users}
         answers = llm.ask('users', {user: request for user, request in requests.items() if request})
         labels = {user: (_label_ids(answers[user], persona2idx, args.max_personas) or []) for user in users if user in answers}
@@ -604,7 +537,6 @@ def label_users(llm, trn, short, personas, persona2idx, args, rounds):
     return gplr, sorted(failed - set(gplr.labels) - gplr.unrepresentable), settings
 
 
-# ----------------------------------------------------------------------------- main
 def _write(path, content):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(content, f, ensure_ascii=False)
@@ -616,7 +548,7 @@ def _dry_run(trn, short, full, personas, args):
         clipped = prompt if len(prompt) <= 6000 else prompt[:4000] + "\n[... {} characters ...]\n".format(len(prompt) - 5000) + prompt[-1000:]
         print("\n==================== {}\n[system]\n{}\n[user]\n{}".format(title, system, clipped))
 
-    print("model {}, effort {}, {}".format(args.model, args.effort, "direct ({} threads)".format(args.direct) if args.direct else "Message Batches"))
+    print("model {}, effort {}, {}".format(MODEL, args.effort, "direct ({} threads)".format(args.direct) if args.direct else "Message Batches"))
     if personas is None:
         requests = step1_requests(trn, short, args)
         print("persona set: {} + {} + 1 requests; the first stage sends {} characters".format(
@@ -639,29 +571,24 @@ def _dry_run(trn, short, full, personas, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='LLM personas for GPLR')
-    parser.add_argument('--dataset', type=str, required=True, help='Dataset name (data/<dataset>)')
-    parser.add_argument('--item_text', type=str, default=None,
-                        help='Item texts: .pkl / .json / .jsonl (default: data/<dataset>/<dataset>_item_profile.jsonl)')
-    parser.add_argument('--domain', type=str, default='a recommendation dataset', help='What the items are, e.g. "books on Amazon"')
-    parser.add_argument('--out_dir', type=str, default='gplr', help='Output folder inside data/<dataset> (persona_dir of gplr.yml)')
-    parser.add_argument('--persona_num', type=int, default=20, help='Size of the generated persona set (paper: 20)')
-    parser.add_argument('--max_personas', type=int, default=5, help='Most personas the LLM gives to a user or an item (paper: 5)')
-    parser.add_argument('--sample_rate', type=float, default=0.2,
-                        help='Share of the users labeled by the LLM (paper: 5%%, 10%%, 20%%, 100%%; release demo: 20%%)')
-    parser.add_argument('--rounds', type=int, default=10, help='Sampling rounds T (paper: 10; release demo: 8)')
-    parser.add_argument('--top_k', type=int, default=5, help='Personas given to a user without LLM label (paper: 5)')
-    parser.add_argument('--beta', type=float, default=0.5, help='De-bias exponent of the prediction (paper: 0.5)')
-    parser.add_argument('--epsilon', type=float, default=0.0,
-                        help='RevAff error tolerance; 0 = exact affinities (paper: exact but for its largest dataset; release demo: 0.1)')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', type=str, required=True)
+    parser.add_argument('--item_text', type=str, default=None)
+    parser.add_argument('--domain', type=str, default='a recommendation dataset')
+    parser.add_argument('--out_dir', type=str, default='gplr')
+    parser.add_argument('--persona_num', type=int, default=20)
+    parser.add_argument('--max_personas', type=int, default=5)
+    parser.add_argument('--sample_rate', type=float, default=0.2)
+    parser.add_argument('--rounds', type=int, default=10)
+    parser.add_argument('--top_k', type=int, default=5)
+    parser.add_argument('--beta', type=float, default=0.5)
+    parser.add_argument('--epsilon', type=float, default=0.0)
     parser.add_argument('--seed', type=int, default=2025)
-    parser.add_argument('--model', type=str, default='claude-haiku-5-5', help='Claude model id')
     parser.add_argument('--effort', type=str, default='low', choices=['low', 'medium', 'high', 'xhigh', 'max'])
-    parser.add_argument('--direct', type=int, default=0, metavar='N',
-                        help='Send single requests from N threads instead of Message Batches')
-    parser.add_argument('--poll', type=int, default=60, help='Seconds between two checks of a running batch')
-    parser.add_argument('--build_only', action='store_true', help='Rebuild the output files from the stored answers')
-    parser.add_argument('--dry_run', action='store_true', help='Print one prompt of each stage and send nothing')
+    parser.add_argument('--direct', type=int, default=0, metavar='N')
+    parser.add_argument('--poll', type=int, default=60)
+    parser.add_argument('--build_only', action='store_true')
+    parser.add_argument('--dry_run', action='store_true')
     args = parser.parse_args()
 
     data_dir = os.path.join(REPO_DIR, 'data', args.dataset)
@@ -691,7 +618,6 @@ def main():
     os.makedirs(raw_dir, exist_ok=True)
     llm = LLM(args, raw_dir)
 
-    # ---- stage 1: persona set
     if personas is None:
         if args.build_only:
             sys.exit("{} does not exist: nothing to build from".format(set_path))
@@ -702,7 +628,6 @@ def main():
     _write(os.path.join(out_dir, 'persona2idx.json'), persona2idx)
     print("persona set ({}): {}".format(len(names), ', '.join(names)))
 
-    # the stored item and user answers belong to one persona set
     digest = hashlib.sha1(json.dumps(personas, sort_keys=True).encode()).hexdigest()[:12]
     digest_path = os.path.join(raw_dir, 'persona_set.sha1')
     if os.path.exists(digest_path):
@@ -714,13 +639,11 @@ def main():
         with open(digest_path, 'w', encoding='utf-8') as f:
             f.write(digest)
 
-    rounds = load_rounds(args, raw_dir)  # stops here when the stored rounds belong to other sampling settings
+    rounds = load_rounds(args, raw_dir)
 
-    # ---- stage 2 is submitted first and collected last: its batch runs while the user rounds follow each other
     requests = item_requests(full, personas, args)
     llm.submit('items', requests)
 
-    # ---- stage 3: GPLR
     gplr, failed_users, sampling = label_users(llm, trn, short, personas, persona2idx, args, rounds)
     if not gplr.labels:
         sys.exit("no user has a persona label yet; run the same command again")
@@ -737,9 +660,9 @@ def main():
     _write(os.path.join(out_dir, 'tri_graph_uidx2pidx.json'), {str(user): user_personas[user] for user in sorted(user_personas)})
     used = np.bincount([p for ps in user_personas.values() for p in ps], minlength=len(names))
     meta = {
-        'dataset': args.dataset, 'domain': args.domain, 'model': args.model, 'effort': args.effort,
+        'dataset': args.dataset, 'domain': args.domain, 'model': MODEL, 'effort': args.effort,
         'persona_num': len(names), 'max_personas': args.max_personas,
-        'sampling': sampling,  # the settings the prototype users were drawn with
+        'sampling': sampling,
         'prediction': {'top_k': args.top_k, 'beta': args.beta, 'epsilon': args.epsilon},
         'users': user_num, 'users_llm_labeled': len(gplr.labels), 'users_unrepresentable': len(gplr.unrepresentable),
         'users_without_answer': len(failed_users), 'users_predicted': len(predicted),

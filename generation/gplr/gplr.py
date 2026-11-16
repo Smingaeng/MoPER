@@ -1,42 +1,13 @@
-"""GPLR (SIGIR'25, "You Are What You Bought"): personas for every user from the LLM labels of a few prototype users.
-
-Ported from https://github.com/Hanc1999/YouAreWhatYouBought (src/random_walker/ReverseRW.py, PageRank.py,
-Evaluation.py, src/utils/GraphMaker.py and the driver cells of src/gplr.ipynb).  The method is unchanged; the node
-objects of the release became arrays, and the oracle that looks answers up became the caller's LLM round.
-
-  * Affinity of an unlabeled user u to a persona p (one user -> item -> user step of a random walk, then the
-    persona of the prototype reached):
-        psi[u, p] = sum_{t in N(u)} 1/|N(u)| * sum_{l in N(t), l prototype} 1/|N(t)| * phi[l, p] / |phi[l]|
-    N(t) counts the users of the graph (prototypes and unlabeled users).  `epsilon = 0` evaluates the sum exactly
-    (the paper's setting for all but its largest dataset); `epsilon > 0` runs RevAff, the reverse push from the
-    persona that stops when no node holds a residue of epsilon / 3 or more.
-  * DUSample: the next users to label are those with the largest
-        entropy(Q_u) + KL(Q_hat || Q_u),
-    Q_u = the user's normalized affinities, Q_hat = the persona distribution of the labels collected so far.
-  * Prediction: the affinities are multiplied by (max_q n_q / n_p) ** beta (n_p = prototypes labeled p), and an
-    unlabeled user receives the top_k personas.
-
-Kept from the release: an affinity that no push reached counts as 1e-12 (so a user with no prototype among the
-co-buyers of its items receives the top_k rarest personas); the sampling scores use no de-bias factor; a persona
-no prototype was labeled with cannot be predicted; users the LLM called "Unrepresentable" are no prototypes,
-leave the sampling scope, stay in the graph of the final prediction as unlabeled users and receive no persona.
-
-The release looks its labels up in a table that holds an answer for every user and samples among the users known
-to be representable.  With a real LLM budget that is not known in advance: here every user can be drawn, a drawn
-user counts against the budget whatever the LLM answers, and is not drawn again.
-"""
 import heapq
 
 import numpy as np
 import scipy.sparse as sp
 import scipy.stats
 
-FLOOR = 1e-12  # affinity of a (user, persona) pair that received no mass
+FLOOR = 1e-12
 
 
 class _MaxHeap:
-    """Max-heap with updatable priorities (ReverseRW.max_heapq): an update removes the entry lazily and pushes a
-    new one.  Entries are [-priority, node id]; equal priorities are ordered by the node id string as in the release."""
     REMOVED = '<removed-task>'
 
     def __init__(self):
@@ -68,22 +39,13 @@ class _MaxHeap:
 
 
 class _LayeredGraph:
-    """The graph of ReverseRW.construct_graph, for a walk  unlabeled user -> item -> user -> persona.
-
-    Layer 3: the unlabeled users, each pointing to its items.  Layer 2: the items, each pointing to every graph
-    user that bought it (prototypes, and the unlabeled users as layer-1 copies that lead nowhere).  Layer 1: the
-    prototypes, each pointing to its personas.  Layer 0: the personas.
-    """
-
     def __init__(self, trn, unlabeled, labeled, labels):
         trn = trn.tocsr()
         self.unlabeled, self.labeled, self.labels = np.asarray(unlabeled, dtype=np.int64), list(labeled), labels
         in_graph = np.concatenate((self.unlabeled, np.asarray(self.labeled, dtype=np.int64))).astype(np.int64)
         self.user_items = {int(u): trn.indices[trn.indptr[u]:trn.indptr[u + 1]] for u in in_graph}
         self.user_degree = np.diff(trn.indptr)
-        # out-degree of an item: its buyers among the graph users
         self.item_out_degree = np.asarray(trn[in_graph].sum(axis=0)).ravel()
-        # in-neighbours of an item: the unlabeled users that bought it
         self.item_unlabeled = trn[self.unlabeled].tocsc()
         self.persona_users = {}
         for user in self.labeled:
@@ -91,9 +53,6 @@ class _LayeredGraph:
                 self.persona_users.setdefault(persona, []).append(user)
 
     def reverse_push(self, persona, epsilon):
-        """ReverseRW.reverse_rw_3.reverse_random_walk_single: the mass 1 placed on the persona is pushed backwards
-        along the edges, always from the node holding most; a node pushes residue / out-degree(neighbour) to each
-        in-neighbour.  Returns {position of the unlabeled user: affinity} for the users that were reached."""
         threshold = epsilon / 3
         reached = {}
         residue = {'p': 1.0}
@@ -121,8 +80,6 @@ class _LayeredGraph:
 
 
 def affinity(trn, unlabeled, labeled, labels, personas, epsilon):
-    """[len(unlabeled), len(personas)] affinities of the unlabeled users to the given personas
-    (ReverseRW.reverse_rw_3.reverse_random_walk_all); pairs without mass hold FLOOR."""
     unlabeled = np.asarray(unlabeled, dtype=np.int64)
     if epsilon > 0:
         graph = _LayeredGraph(trn, unlabeled, labeled, labels)
@@ -143,7 +100,7 @@ def affinity(trn, unlabeled, labeled, labels, personas, epsilon):
             phi[row, column[persona]] = 1.0 / len(own)
     item_degree = np.asarray(trn[np.concatenate((unlabeled, labeled))].sum(axis=0)).ravel()
     inv_item = np.divide(1.0, item_degree, out=np.zeros_like(item_degree), where=item_degree > 0)
-    item_scores = sp.diags(inv_item) @ (trn[labeled].T @ phi)  # [items, personas]
+    item_scores = sp.diags(inv_item) @ (trn[labeled].T @ phi)
     user_degree = np.asarray(trn[unlabeled].sum(axis=1)).ravel()
     inv_user = np.divide(1.0, user_degree, out=np.zeros_like(user_degree), where=user_degree > 0)
     psi = sp.diags(inv_user) @ (trn[unlabeled] @ item_scores)
@@ -151,8 +108,6 @@ def affinity(trn, unlabeled, labeled, labels, personas, epsilon):
 
 
 def _seen_personas(labels, labeled):
-    """Personas of the prototypes in order of first appearance (PageRank.assemble_label_matrix) and the number of
-    prototypes labeled with each."""
     order, count = [], {}
     for user in labeled:
         for persona in dict.fromkeys(labels[user]):
@@ -164,32 +119,23 @@ def _seen_personas(labels, labeled):
 
 
 class GPLR:
-    """Algorithm 1 of the paper around the caller's LLM: `next_users` -> label them -> `add_labels`, for every
-    round; then `predict`.
-
-    trn: [users, items] training interactions.  Labels are lists of persona ids in [0, persona_num).
-    """
-
     def __init__(self, trn, persona_num, epsilon=0.0, seed=0):
         self.trn = sp.csr_matrix(trn)
         self.user_num = self.trn.shape[0]
         self.persona_num = persona_num
         self.epsilon = epsilon
         self.rng = np.random.RandomState(seed)
-        self.labels = {}              # prototype user -> persona ids
-        self.unrepresentable = set()  # users the LLM found no persona for
-        self.asked = set()            # users drawn in an earlier round, answered or not
+        self.labels = {}
+        self.unrepresentable = set()
+        self.asked = set()
 
     def _scope(self):
-        """Users that can still be sampled (Iterative_Sampler_rev.sample_scope minus the labeled users)."""
         taken = np.fromiter(set(self.labels) | self.unrepresentable | self.asked, dtype=np.int64)
         return np.setdiff1d(np.arange(self.user_num), taken)
 
     def next_users(self, amount):
-        """DUSample: `amount` users to label next.  Random while there is no prototype (trivial_rank), afterwards
-        the users with the largest diversity-uncertainty score (criteria_rank_3)."""
         users = self._draw(amount)
-        self.asked.update(users)  # a drawn user is not drawn again, also when the LLM gives no answer for it
+        self.asked.update(users)
         return users
 
     def _draw(self, amount):
@@ -209,7 +155,6 @@ class GPLR:
         return candidates[np.argsort(du)[::-1][:amount]].tolist()
 
     def add_labels(self, answers):
-        """answers: {user: persona ids}; an empty list marks the user as unrepresentable."""
         for user, personas in answers.items():
             personas = list(dict.fromkeys(int(p) for p in personas))
             if personas:
@@ -218,9 +163,6 @@ class GPLR:
                 self.unrepresentable.add(int(user))
 
     def predict(self, top_k=5, beta=0.5):
-        """{user: persona ids} for every user that is neither a prototype nor unrepresentable
-        (ReverseRW.persona_prediction_rev + GraphMaker.make_app), and the number of those users that no
-        prototype reaches."""
         if not self.labels:
             raise ValueError("GPLR.predict: no prototype user has a persona label")
         labeled = sorted(self.labels)

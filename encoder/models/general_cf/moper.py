@@ -1,4 +1,4 @@
-"""PERSONA-MOSAIC: a mixture of LightGCN experts whose experts are clusters of LLM-written user personas.
+"""MoPER: a mixture of LightGCN experts whose experts are clusters of LLM-written user personas.
 
 Phase 1 - experts from personas
     Every user has 1..n LLM-written personas (``data/<dataset>/persona/<persona_file>``: ``record_ids`` 'u<uid>:p<j>',
@@ -127,7 +127,7 @@ def _load_item_profiles(data_dir: Path, item_num: int, raw_dim: int) -> np.ndarr
     profiles = configs.get("itmprf_embeds")
     if profiles is None:
         if not profile_path.exists():
-            raise FileNotFoundError(f"PersonaMosaic needs the RLMRec item profile embeddings {profile_path}.")
+            raise FileNotFoundError(f"MoPER needs the RLMRec item profile embeddings {profile_path}.")
         profiles = _load_pickle(profile_path)
     profiles = np.asarray(profiles, dtype=np.float32)
     if profiles.ndim != 2 or profiles.shape[0] != item_num or profiles.shape[1] != raw_dim:
@@ -346,7 +346,7 @@ def _cluster_personas(embeddings: np.ndarray, params: Dict, cache_path: Path, fi
         os.close(fd)
         have_lock = True
     except FileExistsError:
-        print(f"[persona_mosaic] waiting for another process to write {cache_path} (lock: {lock_path})")
+        print(f"[moper] waiting for another process to write {cache_path} (lock: {lock_path})")
         deadline = time.time() + _CLUSTER_LOCK_TIMEOUT
         while time.time() < deadline:
             time.sleep(2.0)
@@ -695,13 +695,13 @@ def _weighted_infonce(embeds: t.Tensor, ids: t.Tensor, prior_all: t.Tensor, weig
 
 
 # ---------------------------------------------------------------------------
-# PersonaMosaic recommender
+# MoPER recommender
 # ---------------------------------------------------------------------------
 
 _SUMMARY_PRINTED = set()
 
 
-class PersonaMosaic(BaseModel):
+class MoPER(BaseModel):
     """Mixture of K persona-cluster LightGCN experts with persona priors, persona-similarity routing and a fixed
     persona-content score at prediction."""
 
@@ -809,7 +809,7 @@ class PersonaMosaic(BaseModel):
             return configs["model"][key]
         if default is _REQUIRED:
             raise KeyError(
-                f"persona_mosaic.yml has no '{key}' for dataset {configs['data']['name']!r} "
+                f"moper.yml has no '{key}' for dataset {configs['data']['name']!r} "
                 "(add it to the dataset block or the model block, or pass --override)."
             )
         return default
@@ -838,10 +838,10 @@ class PersonaMosaic(BaseModel):
         if key in _SUMMARY_PRINTED:
             return
         _SUMMARY_PRINTED.add(key)
-        print(f"[persona_mosaic] {self.dataset}: {summary}")
+        print(f"[moper] {self.dataset}: {summary}")
         for kd in kinds:
             curve = " ".join(f"{k}:{v:.4f}" for k, v in sorted(kd["silhouette"].items()))
-            print(f"[persona_mosaic] silhouette curve (kind {kd['kind']}, n={kd['size']}, K={kd['K']}): {curve}")
+            print(f"[moper] silhouette curve (kind {kd['kind']}, n={kd['size']}, K={kd['K']}): {curve}")
 
     # ------------------------------------------------------------------ MoE forward
 
@@ -1003,7 +1003,5 @@ class PersonaMosaic(BaseModel):
         return self._mask_predict(scores, train_mask)
 
 
-# models/bulid_model.py looks up a class whose lower-cased name equals the model name 'persona_mosaic'.
-Persona_Mosaic = PersonaMosaic
-
-__all__ = ["PersonaMosaic", "Persona_Mosaic"]
+# models/bulid_model.py looks up a class whose lower-cased name equals the model name 'moper'.
+__all__ = ["MoPER"]
