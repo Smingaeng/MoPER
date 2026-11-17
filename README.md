@@ -67,8 +67,8 @@ released by RLMRec.
 
 Download the interaction matrices (about 8 MB) from [Google Drive](TODO) and put each dataset folder under `data/`
 (`data/amazon_book`, `data/yelp`, `data/amazon_movie`). Only the training, validation and test matrices
-(`trn_mat.pkl`, `val_mat.pkl`, `tst_mat.pkl`) are shared. The other files have to be built first (see
-[Generation](#-generation)).
+(`trn_mat.pkl`, `val_mat.pkl`, `tst_mat.pkl`) are shared. The files marked `[generation]` below are not shared and
+have to be built first (the LLM scripts are in `generation/`).
 
 ```
 - amazon_book (yelp / amazon_movie)
