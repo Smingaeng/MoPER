@@ -24,7 +24,7 @@ data:
   name: yelp
 
 model:
-  name: moper
+  name: personagraphrec
   type: discriminative
   embedding_size: 32
   keep_rate: 1.0                       # edge keep rate of the expert propagation during training (1.0: no edge dropout)

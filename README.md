@@ -1,12 +1,12 @@
-# MoPER
+# PersonaGraphRec
 
 <!-- TODO: paper title, authors, venue and link -->
 
-This is the PyTorch implementation of **MoPER**, a mixture-of-experts recommender whose experts are built from
+This is the PyTorch implementation of **PersonaGraphRec**, a mixture-of-experts recommender whose experts are built from
 LLM-written user personas.
 
 Every user is described by one or more personas (an LLM-written name and summary, embedded with Qwen3-Embedding-8B),
-and every item by its profile embedding in the same text space. MoPER works in two phases:
+and every item by its profile embedding in the same text space. PersonaGraphRec works in two phases:
 
 - **Phase 1: persona experts.** The persona pool is clustered in two stages: k-means first splits it into persona
   kinds, then each kind is clustered with the number of clusters chosen by the silhouette score. Every cluster becomes
@@ -22,8 +22,8 @@ and every item by its profile embedding in the same text space. MoPER works in t
 Create a conda environment:
 
 ```bash
-conda create -y -n moper python=3.10
-conda activate moper
+conda create -y -n personagraphrec python=3.10
+conda activate personagraphrec
 pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 pip install numpy==2.0.2 scipy==1.13.1 pyyaml
 ```
@@ -36,18 +36,18 @@ All experiments were run on a single NVIDIA A100 (80GB) GPU.
 ## 📂 Code Structure
 
 ```
-MoPER
+PersonaGraphRec
 |--- encoder/                     # training and evaluation
 |    |--- train_encoder.py        # entry point
 |    |--- config/
 |    |    |--- configurator.py    # command-line arguments
-|    |    |--- modelconf/         # hyperparameters: moper.yml, promax.yml, tall.yml, hyperllm.yml, gplr.yml
+|    |    |--- modelconf/         # hyperparameters: personagraphrec.yml, promax.yml, tall.yml, hyperllm.yml, gplr.yml
 |    |--- data_utils/             # data loading
 |    |--- models/
-|    |    |--- general_cf/        # moper.py, promax.py, tall.py, hyperllm.py, gplr.py
+|    |    |--- general_cf/        # personagraphrec.py, promax.py, tall.py, hyperllm.py, gplr.py
 |    |--- trainer/                # training loop, metrics and logger
 |--- generation/                  # LLM-generated inputs of the models
-|    |--- moper/                  # user personas: generate_personas.py
+|    |--- personagraphrec/        # user personas: generate_personas.py
 |    |--- promax/                 # latent interactions: generate_rag.py
 |    |--- hyperllm/               # tag hierarchy: generate_tags.py
 |    |--- gplr/                   # personas: generate_personas.py, gplr.py
@@ -79,8 +79,8 @@ have to be built first (the LLM scripts are in `generation/`).
 |--- usr_emb_np.pkl         # user profile embeddings                                        [generation]
 |--- itm_emb_np.pkl         # item profile embeddings                                        [generation]
 |--- persona/
-|    |--- persona_emb_v22.pkl           # user persona embeddings (MoPER)                    [generation]
-|    |--- persona_clusters_v22_*.pkl    # Phase 1 clustering, written by MoPER on its first run
+|    |--- persona_emb_v22.pkl           # user persona embeddings (PersonaGraphRec)          [generation]
+|    |--- persona_clusters_v22_*.pkl    # Phase 1 clustering, written by PersonaGraphRec on its first run
 |--- hyperllm/              # LLM tag hierarchy (HyperLLM): id_to_tag / tag_to_tag / tag_to_item .json      [generation]
 |--- gplr/                  # LLM personas (GPLR): persona2idx / tri_graph_uidx2pidx / tri_graph_tidx2pidx .json   [generation]
 ```
@@ -89,23 +89,23 @@ Each dataset has a training set, a validation set and a test set. The validation
 
 Besides the three splits, each model reads the following files:
 
-| Model      | Files                                                              |
-|------------|--------------------------------------------------------------------|
-| `moper`    | `itm_emb_np.pkl`, `persona/persona_emb_v22.pkl`                    |
-| `promax`   | `usr_emb_np.pkl`, `itm_emb_np.pkl`, `new_trn_rag_mat.pkl`          |
-| `tall`     | none                                                               |
-| `hyperllm` | `usr_emb_np.pkl`, `itm_emb_np.pkl`, `hyperllm/*.json`              |
-| `gplr`     | `gplr/*.json`                                                      |
+| Model             | Files                                                              |
+|-------------------|--------------------------------------------------------------------|
+| `personagraphrec` | `itm_emb_np.pkl`, `persona/persona_emb_v22.pkl`                    |
+| `promax`          | `usr_emb_np.pkl`, `itm_emb_np.pkl`, `new_trn_rag_mat.pkl`          |
+| `tall`            | none                                                               |
+| `hyperllm`        | `usr_emb_np.pkl`, `itm_emb_np.pkl`, `hyperllm/*.json`              |
+| `gplr`            | `gplr/*.json`                                                      |
 
 
 ## 🚀 Examples to run the codes
 
 Run the commands from the root of the repository.
 
-- MoPER:
+- PersonaGraphRec:
 
   ```bash
-  python encoder/train_encoder.py --model moper --dataset {dataset} --cuda 0
+  python encoder/train_encoder.py --model personagraphrec --dataset {dataset} --cuda 0
   ```
 
 - Baselines:
@@ -116,7 +116,7 @@ Run the commands from the root of the repository.
 
 Supported models/datasets:
 
-* MoPER: `moper`
+* PersonaGraphRec: `personagraphrec`
 * model_name: `promax` ([ProMax](https://github.com/BlueGhostYi/ProRec)),
   `tall` ([TALL](https://github.com/JP-25/end-To-end-Adaptive-Local-Leanring-TALL-)),
   `hyperllm` ([HyperLLM](https://github.com/Qin-lab-code/HyperLLM)),

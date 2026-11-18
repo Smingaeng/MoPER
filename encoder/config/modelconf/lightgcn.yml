@@ -1,0 +1,43 @@
+optimizer:
+  name: adam
+  lr: 1.0e-3
+  weight_decay: 0
+
+# Shared by every model for a fair comparison (ProEx/ProMax papers: lr 1e-3, batch 4096, d=32, 3 layers).
+train:
+  epoch: 3000
+  batch_size: 4096
+  save_model: false
+  loss: pairwise
+  test_step: 3
+  reproducible: true
+  seed: 2025
+  patience: 30                   # evaluations (one every test_step epochs) without a new best before early stopping
+  early_stop_metric: goal_mean   # goal_mean: validation mean of recall@5, recall@10, ndcg@5, ndcg@10 | recall_last: recall@20
+
+test:
+  metrics: [recall, ndcg]
+  k: [5, 10, 20]
+  batch_size: 1024
+
+data:
+  type: general_cf
+  name: yelp
+
+model:
+  name: lightgcn
+  type: discriminative
+  keep_rate: 1.0
+  embedding_size: 32
+
+  layer_num: 3
+  reg_weight: 1.0e-6
+  yelp:
+    layer_num: 3
+    reg_weight: 1.0e-6
+  amazon_book:
+    layer_num: 3
+    reg_weight: 1.0e-6
+  amazon_movie:
+    layer_num: 3
+    reg_weight: 1.0e-6

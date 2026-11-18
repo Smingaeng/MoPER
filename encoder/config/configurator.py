@@ -7,8 +7,8 @@ ENCODER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(os.path.dirname(ENCODER_DIR), 'data')
 
 def parse_configure(model=None, dataset=None):
-    parser = argparse.ArgumentParser(description='MoPER')
-    parser.add_argument('--model', type=str, default='moper', help='Model name: moper | promax | tall | hyperllm | gplr')
+    parser = argparse.ArgumentParser(description='PersonaGraphRec')
+    parser.add_argument('--model', type=str, default='personagraphrec', help='Model name: personagraphrec | promax | tall | hyperllm | gplr')
     parser.add_argument('--dataset', type=str, default='yelp', help='Dataset name')
     parser.add_argument('--device', type=str, default='cuda', help='cpu or cuda')
     parser.add_argument('--seed', type=int, default=None, help='Random seed (default: train.seed of the model yml)')
@@ -65,7 +65,7 @@ def parse_configure(model=None, dataset=None):
         if args.save_model:
             configs['train']['save_model'] = True
 
-        # RLMRec profile embeddings (ProMax: user and item profiles; MoPER: item profiles)
+        # RLMRec profile embeddings (ProMax: user and item profiles; PersonaGraphRec: item profiles)
         configs['data']['dir'] = os.path.join(DATA_DIR, configs['data']['name'])
         usrprf_embeds_path = os.path.join(configs['data']['dir'], 'usr_emb_np.pkl')
         itmprf_embeds_path = os.path.join(configs['data']['dir'], 'itm_emb_np.pkl')

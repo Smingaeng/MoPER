@@ -1,0 +1,62 @@
+optimizer:
+  name: adam
+  lr: 1.0e-3                     # release (conf/SimGCL.yaml): 0.001, Adam
+  weight_decay: 0                # the L2 term (reg_weight) is part of the model's loss
+
+# epoch / test_step / patience / early_stop_metric are shared by every model for a fair comparison
+# (the release: 20 epochs, evaluation every epoch on the test split, no validation split).
+train:
+  epoch: 3000
+  batch_size: 2048               # release: 2048 (the contrast takes its negatives from the batch)
+  save_model: false
+  loss: pairwise
+  test_step: 3
+  reproducible: true
+  seed: 2025
+  patience: 30                   # evaluations (one every test_step epochs) without a new best before early stopping
+  early_stop_metric: goal_mean   # goal_mean: validation mean of recall@5, recall@10, ndcg@5, ndcg@10 | recall_last: recall@20
+
+test:
+  metrics: [recall, ndcg]
+  k: [5, 10, 20]
+  batch_size: 1024
+
+data:
+  type: general_cf
+  name: yelp
+
+model:
+  name: simgcl
+  type: discriminative
+  embedding_size: 32             # release: 64
+
+  # Values of the release (conf/SimGCL.yaml); the temperature is fixed to 0.2 in its code.
+  # reg_form: release = reg_weight * (||U_batch|| + ||I_batch||) / batch size (the L2 of the release)
+  #           params  = reg_weight * squared norm of the two embedding tables (the L2 of the other models here; not in the release)
+  layer_num: 2                   # n_layer
+  reg_weight: 1.0e-4             # reg.lambda
+  reg_form: release
+  cl_weight: 0.5                 # lambda
+  eps: 0.1
+  temperature: 0.2
+  yelp:
+    layer_num: 2
+    reg_weight: 1.0e-4
+    reg_form: release
+    cl_weight: 0.5
+    eps: 0.1
+    temperature: 0.2
+  amazon_book:
+    layer_num: 2
+    reg_weight: 1.0e-4
+    reg_form: release
+    cl_weight: 0.5
+    eps: 0.1
+    temperature: 0.2
+  amazon_movie:
+    layer_num: 2
+    reg_weight: 1.0e-4
+    reg_form: release
+    cl_weight: 0.5
+    eps: 0.1
+    temperature: 0.2
