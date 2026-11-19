@@ -30,7 +30,7 @@ pip install numpy==2.0.2 scipy==1.13.1 pyyaml
 
 All experiments were run on a single NVIDIA A100 (80GB) GPU.
 
-😉 The code is built on the encoder framework of [RLMRec](https://github.com/HKUDS/RLMRec), which is based on
+The code is built on the encoder framework of [RLMRec](https://github.com/HKUDS/RLMRec), which is based on
 [SSLRec](https://github.com/HKUDS/SSLRec).
 
 ## 📂 Code Structure
@@ -65,7 +65,7 @@ released by RLMRec.
 | Yelp         | 11,091 | 11,010 | 166,620 | 55,479 | 55,436 |
 | Amazon-Movie |  7,351 |  7,002 |  57,283 | 19,028 | 18,863 |
 
-Download the interaction matrices (about 8 MB) from [Google Drive](TODO) and put each dataset folder under `data/`
+Download the interaction matrices (about 8 MB) from [Google Drive](https://drive.google.com/drive/folders/12qwMbhaVnbY9TAG7AT-VTwUPRLkx-dDR?usp=sharing) and put each dataset folder under `data/`
 (`data/amazon_book`, `data/yelp`, `data/amazon_movie`). Only the training, validation and test matrices
 (`trn_mat.pkl`, `val_mat.pkl`, `tst_mat.pkl`) are shared. The files marked `[generation]` below are not shared and
 have to be built first (the LLM scripts are in `generation/`).
@@ -80,7 +80,6 @@ have to be built first (the LLM scripts are in `generation/`).
 |--- itm_emb_np.pkl         # item profile embeddings                                        [generation]
 |--- persona/
 |    |--- persona_emb_v22.pkl           # user persona embeddings (PersonaGraphRec)          [generation]
-|    |--- persona_clusters_v22_*.pkl    # Phase 1 clustering, written by PersonaGraphRec on its first run
 |--- hyperllm/              # LLM tag hierarchy (HyperLLM): id_to_tag / tag_to_tag / tag_to_item .json      [generation]
 |--- gplr/                  # LLM personas (GPLR): persona2idx / tri_graph_uidx2pidx / tri_graph_tidx2pidx .json   [generation]
 ```
